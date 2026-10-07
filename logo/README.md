@@ -2,7 +2,7 @@
 
 | Plik | Do czego |
 |---|---|
-| `fb-jelcz.step` | Bryła 3D (166,4 × 30 × 3 mm), dwie bryły: niebieska `FB-` i czerwona `JELCZ`. Otwierasz w Inventorze i zapisujesz jako `.ipt`. |
+| `fb-jelcz.step` | Bryła 3D (199,7 × 36 × 3 mm), dwie bryły: niebieska `FB-` i czerwona `JELCZ`. Otwierasz w Inventorze i zapisujesz jako `.ipt`. |
 | `fb-jelcz.dxf` | Kontury 2D (warstwy `BLUE` i `RED`) do wstawienia w szkic Inventora. |
 | `fb-jelcz.svg` | Podgląd wektora. |
 | `make_logo.py` | Skrypt, który generuje te pliki z `fb-jelcz-source.png`. |

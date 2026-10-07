@@ -12,7 +12,7 @@ import cadquery as cq
 
 HERE = Path(__file__).parent
 SRC = HERE / "fb-jelcz-source.png"
-HEIGHT_MM = float(sys.argv[1]) if len(sys.argv) > 1 else 30.0   # height of the lettering
+HEIGHT_MM = float(sys.argv[1]) if len(sys.argv) > 1 else 36.0   # height of the lettering
 THICK_MM = float(sys.argv[2]) if len(sys.argv) > 2 else 3.0     # extrusion depth
 UPSCALE = 12
 
