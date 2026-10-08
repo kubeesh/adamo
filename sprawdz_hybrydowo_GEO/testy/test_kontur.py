@@ -21,7 +21,7 @@ WID = "Widoczne (ISO)"
 
 def zapisz_dxf(nazwa, linie=(), okregi=(), polilinie=(), folder=TMP):
     """linie: (x1, y1, x2, y2[, warstwa]); okregi: (x, y, r[, warstwa]); polilinie: (pkt, warstwa)."""
-    doc = ezdxf.new("R2010")
+    doc = ezdxf.new("R2010", units=ezdxf.units.MM)   # jak Inventor: $INSUNITS=4
     msp = doc.modelspace()
     for l in linie:
         msp.add_line(l[:2], l[2:4], dxfattribs={"layer": l[4] if len(l) > 4 else WID})
@@ -183,6 +183,53 @@ def test_faza_niezwymiarowana_bez_notek():
     assert not bl and any("faza 15x15 (4 szt.) z DXF nie jest zwymiarowana" in x for x in uw), (bl, uw)
     _, (_, uw) = ocena(zapisz_dxf("faza15b.dxf", prostokat_z_fazami(15)), "200\n100\n15")
     assert not uw, uw
+
+
+def test_jednostki_cale():
+    doc = ezdxf.new("R2010", units=ezdxf.units.IN)
+    for l in prostokat():
+        doc.modelspace().add_line(l[:2], l[2:4], dxfattribs={"layer": WID})
+    sciezka = os.path.join(TMP, "cale.dxf")
+    doc.saveas(sciezka)
+    _, (bl, uw) = ocena(sciezka)
+    assert not bl and any("calach" in x for x in uw), (bl, uw)
+
+
+def test_blok_insert_i_okrag_odwrocony():
+    """Geometria schowana w bloku (INSERT) i okrąg z wektorem wyciągnięcia (0,0,-1)."""
+    doc = ezdxf.new("R2010", units=ezdxf.units.MM)
+    blk = doc.blocks.new("CZESC")
+    for l in prostokat():
+        blk.add_line(l[:2], l[2:4], dxfattribs={"layer": "0"})
+    msp = doc.modelspace()
+    msp.add_blockref("CZESC", (0, 0), dxfattribs={"layer": WID})
+    msp.add_circle((-50, 50), 5, dxfattribs={"layer": WID, "extrusion": (0, 0, -1)})   # w WCS: (50, 50)
+    sciezka = os.path.join(TMP, "blok.dxf")
+    doc.saveas(sciezka)
+    ana = S.dxf_analiza(sciezka)
+    assert not ana["przerwy"] and not ana["wolne"] and not ana["rozgal"] and not ana["pusty"], ana
+    assert ana["reczne"] == 0, ana                                  # warstwa "0" w bloku dziedziczy warstwę wstawienia
+    assert abs(ana["okregi"][0][1][0] - 50) < 1e-6, ana["okregi"]   # środek przeliczony do WCS
+
+
+def test_pusty_dxf():
+    sciezka = zapisz_dxf("pusty.dxf", [(0, 0, 100, 0, "Wymiar (ISO)")])
+    _, (bl, _) = ocena(sciezka)
+    assert any("nie ma żadnej geometrii" in x for x in bl), bl
+
+
+def test_autotest_wykrywa_awarie():
+    """Autotest musi przejść normalnie i NIE przejść, gdy pomiar geometrii jest zepsuty
+    (np. inna wersja biblioteki na komputerze użytkownika)."""
+    assert S.autotest()["ok"], S.autotest()
+    oryginal = S._odl_do_odcinkow
+    try:
+        S._odl_do_odcinkow = lambda P, seg: (_ for _ in ()).throw(TypeError("symulowana awaria numpy"))
+        assert not S.autotest()["ok"]
+        S._odl_do_odcinkow = lambda P, seg: (oryginal(P, seg)[0] * 0, oryginal(P, seg)[1])   # "wszystko pasuje"
+        assert not S.autotest()["ok"]
+    finally:
+        S._odl_do_odcinkow = oryginal
 
 
 def test_caly_folder():

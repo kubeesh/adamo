@@ -28,7 +28,12 @@ nie ma wymiarów. Szczegóły i progi: sekcja "kontur DXF vs rysunek" niżej. Te
 2026-10-08 — NAKŁADKA DXF 1:1 na widok z rysunku PDF (wektorowo, bez skanowania obrazu): każdy punkt
 konturu DXF musi leżeć na linii rysunku (tol. 1 mm), plus podgląd NAKLADKI_<data>.pdf. Sprawdzone na
 prawdziwej części PG4136348 (GE21745AF): zgodna 0,43 mm; zepsucie fazy / przesunięcie wycięcia wykryte.
-Testy: testy/test_100_czesci.py (100 części, 12 typów wad).
+Testy: testy/test_100_czesci.py (100 części, 14 typów wad, 8 odmian rysunku/DXF).
+2026-10-08 (uodpornienie) — ZASADA BEZPIECZEŃSTWA: każdy DXF ma status ZGODNY 1:1 / RÓŻNICE / NIEZWERYFIKOWANY
+(z powodem; zakładka "Weryfikacja DXF 1 do 1"), folder "ZGODNY" tylko gdy wszystkie DXF potwierdzone; AUTOTEST
+przy starcie; błąd programu przy pozycji/folderze nie przerywa reszty i trafia do raportu jako BŁĄD; szukanie
+widoku przez korelację obrazu strony (FFT) gdy skupiska zawiodą; dowolny kąt widoku; tolerancja dopasowana do
+dokładności rysunku; bloki INSERT, OCS okręgów, jednostki DXF; notki faz tylko przy widoku rozwinięcia.
 
   Kategorie części (z DESCRIPTION + flag + struktury BOM):
   - blacha "PL t x a x b" (Normal)          -> DXF + PDF (99% archiwum),
@@ -146,6 +151,14 @@ ALIASY_KOLUMN = {
 # zbiorczy raport strukturalny (wszystkie foldery podane w jednym uruchomieniu)
 WSZYSTKIE_WIERSZE = []   # list of dict: folder, pos, part, tytul, poziom, plik, rodzaj, opis
 PODSUMOWANIE_FOLDEROW = []  # list of dict: folder, ok, bledy, uwagi
+WERYFIKACJA_DXF = []     # list of dict: jeden wpis na każdy DXF części — status 1:1 z rysunkiem i dowód
+
+# ZASADA BEZPIECZEŃSTWA (2026-10-08): DXF jest "ZGODNY 1:1" tylko wtedy, gdy program POZYTYWNIE potwierdził
+# go nakładką na rysunek i kontur jest czysty. Wszystko inne (brak PDF, brak widoku, błąd programu,
+# odbicie lustrzane, obróbka z naddatkiem) to "NIEZWERYFIKOWANY" z powodem — nigdy cichy sukces.
+AUTOTEST = dict(ok=True, opis="nie uruchamiany (moduł zaimportowany)")
+PODGLAD_WSZYSTKIE = os.environ.get("SPRAWDZ_PODGLAD_WSZYSTKIE") == "1"          # podgląd nakładki każdej części
+NIEZWERYFIKOWANE_BLOKUJA = os.environ.get("SPRAWDZ_NIEZWERYFIKOWANE_BLAD") == "1"  # kod wyjścia 1 przy niezweryf.
 
 
 # ---------------------------------------------------------------- BOM
@@ -334,6 +347,14 @@ def mat_zgodny(a, b):
 def czytaj_pdf(path):
     doc = fitz.open(path)
     text = "\n".join(doc[i].get_text() for i in range(len(doc)))
+    notki = []          # notki faz z położeniem: (strona, x, y, nogi) — do odróżnienia faz narożnika od krawędzi
+    for nr, strona in enumerate(doc):
+        for blok in strona.get_text("dict")["blocks"]:
+            for linia in blok.get("lines", []):
+                t = "".join(sp["text"] for sp in linia["spans"])
+                for f in wymiary_rysunku(t)["fazy"]:
+                    x0, y0, x1, y1 = linia["bbox"]
+                    notki.append(dict(f, strona=nr, x=(x0 + x1) / 2, y=(y0 + y1) / 2))
     doc.close()
     out = {}
     m = re.search(r"Ilość\s*:\s*(\d+)", text)
@@ -355,6 +376,7 @@ def czytaj_pdf(path):
     if m:
         out["mat"] = m.group(1)
     out.update(wymiary_rysunku(text))
+    out["notki_faz"] = notki
     return out
 
 
@@ -405,7 +427,18 @@ def dxf_gabaryt(path):
     from ezdxf import path as ezpath
     doc = ezdxf.readfile(path)
     pts = []
-    for e in doc.modelspace():
+
+    def elementy(kontener, glebokosc=0):
+        for e in kontener:
+            if e.dxftype() == "INSERT" and glebokosc < 8:     # geometria w bloku (2026-10-08)
+                try:
+                    yield from elementy(list(e.virtual_entities()), glebokosc + 1)
+                except Exception:
+                    pass
+            else:
+                yield e
+
+    for e in elementy(doc.modelspace()):
         if e.dxftype() in ("TEXT", "MTEXT", "DIMENSION", "POINT", "ATTRIB"):
             continue
         try:
@@ -539,11 +572,24 @@ def _klastry(punkty, tol):
 
 def _prymitywy_dxf(doc):
     """Elementy tnące z modelspace rozbite na LINE/ARC/CIRCLE/SPLINE/ELLIPSE (polilinie
-    rozbijane na odcinki i łuki), każdy jako łamana pts (krok 0,01 mm na łukach)."""
+    rozbijane na odcinki i łuki, bloki INSERT rozwijane — elementy na warstwie "0" w bloku dziedziczą
+    warstwę wstawienia, jak w AutoCADzie), każdy jako łamana pts (krok 0,01 mm na łukach)."""
     out = []
 
-    def dodaj(e, warstwa):
+    def dodaj(e, warstwa, glebokosc=0):
         t = e.dxftype()
+        if t == "INSERT":
+            if glebokosc > 8:
+                return
+            try:
+                for v in e.virtual_entities():
+                    w = v.dxf.get("layer", "0")
+                    w = warstwa if w == "0" else w
+                    if not WARSTWY_NIE_TNACE.search(w):
+                        dodaj(v, w, glebokosc + 1)
+            except Exception:
+                pass
+            return
         if t in ("LWPOLYLINE", "POLYLINE"):
             try:
                 for v in e.virtual_entities():
@@ -565,7 +611,8 @@ def _prymitywy_dxf(doc):
         p = dict(typ=t, warstwa=warstwa, pts=pts, dl=dl, reczny=warstwa == "0",
                  zamk=t == "CIRCLE" or math.dist(pts[0], pts[-1]) < STYK_TOL)
         if t == "CIRCLE":
-            p["srodek"] = (e.dxf.center.x, e.dxf.center.y)
+            c = e.ocs().to_wcs(e.dxf.center)       # okrąg z wektorem wyciągnięcia (0,0,-1) ma środek w OCS
+            p["srodek"] = (c.x, c.y)
             p["fi"] = 2 * e.dxf.radius
         out.append(p)
 
@@ -605,12 +652,17 @@ def _faza(S, sasiad_a, sasiad_b):
     return nogi[0], nogi[1], tuple(a - t1 * u1)
 
 
+JEDNOSTKI_DXF = {1: "calach", 2: "stopach", 5: "centymetrach", 6: "metrach", 14: "decymetrach"}
+
+
 def dxf_analiza(path):
     """Kontur DXF tak, jak zobaczy go wypalarka. Zwraca słownik z listami problemów
     (punkty w układzie współrzędnych DXF, żeby dało się je znaleźć w AutoCADzie)."""
-    prym = _prymitywy_dxf(ezdxf.readfile(path))
+    doc = ezdxf.readfile(path)
+    prym = _prymitywy_dxf(doc)
     wynik = dict(duble=0, przerwy=[], wolne=[], rozgal=[], fazy=[], okregi=[],
-                 wspolsrodkowe=[], reczne=0, wystaje=[])
+                 wspolsrodkowe=[], reczne=0, wystaje=[], jednostki=doc.header.get("$INSUNITS", 0),
+                 pusty=not prym)
     if not prym:
         return wynik
 
@@ -761,50 +813,73 @@ def dxf_analiza(path):
 
 # ---------------------------------------------------------------- nakładka DXF na rysunek PDF (1:1)
 # Rysunki z Inventora są WEKTOROWE: linie widoku są w PDF jako prawdziwe odcinki, nie piksele.
-# Program szuka na rysunku widoku, którego obrys ma wymiary DXF w którejś ze skal (1:k), nakłada
-# na niego kontur DXF (8 orientacji: obrót co 90° i lustro, dosunięcie metodą ICP) i mierzy,
-# jak daleko każdy punkt DXF leży od linii rysunku — i odwrotnie. Dokładność ~0,1 mm przy 1:10.
-NAKLADKA_TOL = 1.0     # mm — punkt DXF dalej od linii rysunku = różnica
-NAKLADKA_ZLY = 2.0     # mm — 95% punktów dalej niż to = widok nie pasuje do DXF w ogóle
+# 1. Szukanie widoku: (a) skupiska stykających się linii, których obrys ma wymiary DXF w skali widoku
+#    (skale z opisów "( 1 : 10 )", a bez opisów — typowe skale), (b) gdy to zawiedzie (adnotacje
+#    sklejone z widokiem, brak opisu, widok obrócony) — korelacja obrazu całej strony z obrazem DXF
+#    (FFT) we wszystkich orientacjach i skalach.
+# 2. Wstępne ustawienie każdej orientacji: korelacja FFT obrazu widoku z obrazem DXF (dowolne
+#    przesunięcie), orientacje: obroty co 90°, lustro, plus kąt z minimalnego prostokąta otaczającego.
+# 3. Dokładne dosunięcie: ICP sztywne (przesunięcie + mały obrót) na WEKTORACH — obraz służy tylko do
+#    znalezienia przybliżonego położenia, pomiar odchyłek jest zawsze wektorowy.
+# 4. Pomiar: odległość każdego punktu DXF od linii rysunku (DXF -> rysunek) oraz zamknięte elementy
+#    wewnątrz widoku (otwory, wycięcia), których nie ma w DXF (rysunek -> DXF).
+NAKLADKA_TOL_MM = 1.0   # mm — minimalna tolerancja zgodności DXF z rysunkiem
+NAKLADKA_TOL_PT = 0.25  # pt na papierze — górna granica: dokładność zapisu widoku w PDF (zmierzona na PG4136348:
+#                         ~0,12 pt), z zapasem; przy 1:k tolerancja <= max(1 mm, 0,25 pt * k) (1:10: 1 mm, 1:40: 3,5 mm)
+NAKLADKA_TOL_PT_MIN = 0.06  # pt — dolna granica dla rysunków bardzo dokładnych (tolerancja dopasowana do szumu)
+NAKLADKA_ZLY = 2.0      # mm — połowa punktów DXF dalej niż to (x tolerancja) = widok nie pasuje do DXF w ogóle
 SKALE_RYSUNKU = (1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 7.5, 8, 10, 12, 12.5, 15, 20, 25, 30, 40, 50, 75, 100)
-NAKLADKI_PDF = []      # (część, ścieżka PDF, strona, punkty DXF na stronie, odchyłki mm) do zbiorczego PDF
+NAKLADKI_PDF = []       # (część, ścieżka PDF, strona, punkty DXF na stronie, odchyłki mm, tolerancja)
+
+
+def tolerancja_nakladki(skala, r=None):
+    """Tolerancja nakładki w mm dla widoku 1:skala. Z odchyłkami r (mm) dopasowana do dokładności tego
+    rysunku: 4 x 90. percentyl odchyłek, w granicach [0,06 pt; 0,25 pt] * skala, nie mniej niż 1 mm. Dokładny
+    rysunek -> ciasna tolerancja (brak fazy 5 mm przy 1:40 widać), rysunek "szumiący" -> górna granica."""
+    pt_mm = skala * 25.4 / 72
+    if r is None or not len(r):
+        return max(NAKLADKA_TOL_MM, NAKLADKA_TOL_PT * pt_mm)
+    szum = 4 * float(np.percentile(r, 90))
+    return max(NAKLADKA_TOL_MM, min(NAKLADKA_TOL_PT * pt_mm, max(NAKLADKA_TOL_PT_MIN * pt_mm, szum)))
 
 
 def _pdf_odcinki(strona):
-    """Wszystkie odcinki rysunku (krzywe Beziera rozbite na 8 odcinków): [szer, x1, y1, x2, y2]."""
+    """Wszystkie odcinki rysunku (krzywe Beziera rozbite na 8 odcinków):
+    [szer, x1, y1, x2, y2, wypełniony, kreskowany]. Wypełnione kształty to groty strzałek
+    (przekroje, wymiary), kreskowane — linie ukryte, osie, linie gięcia."""
     out = []
     for d in strona.get_drawings():
         w = d.get("width") or 0
+        wyp = 1.0 if d.get("fill") is not None else 0.0
+        kresk = 1.0 if re.search(r"\d", (d.get("dashes") or "").split("]")[0]) else 0.0
         for it in d["items"]:
             if it[0] == "l":
-                out.append((w, it[1].x, it[1].y, it[2].x, it[2].y))
+                out.append((w, it[1].x, it[1].y, it[2].x, it[2].y, wyp, kresk))
             elif it[0] == "c":
                 p = it[1:5]
                 pts = [((1 - t) ** 3 * p[0].x + 3 * (1 - t) ** 2 * t * p[1].x + 3 * (1 - t) * t * t * p[2].x
                         + t ** 3 * p[3].x,
                         (1 - t) ** 3 * p[0].y + 3 * (1 - t) ** 2 * t * p[1].y + 3 * (1 - t) * t * t * p[2].y
                         + t ** 3 * p[3].y) for t in np.linspace(0, 1, 9)]
-                out += [(w, *a, *b) for a, b in zip(pts, pts[1:])]
+                out += [(w, *a, *b, wyp, kresk) for a, b in zip(pts, pts[1:])]
             elif it[0] == "re":
                 r = it[1]
                 c = [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]
-                out += [(w, *a, *b) for a, b in zip(c, c[1:] + c[:1])]
+                out += [(w, *a, *b, wyp, kresk) for a, b in zip(c, c[1:] + c[:1])]
             elif it[0] == "qu":
                 q = it[1]
                 c = [(q.ul.x, q.ul.y), (q.ur.x, q.ur.y), (q.lr.x, q.lr.y), (q.ll.x, q.ll.y)]
-                out += [(w, *a, *b) for a, b in zip(c, c[1:] + c[:1])]
-    return np.array(out) if out else np.zeros((0, 5))
+                out += [(w, *a, *b, wyp, kresk) for a, b in zip(c, c[1:] + c[:1])]
+    return np.array(out) if out else np.zeros((0, 7))
 
 
-def _linie_grube(seg):
-    """Linie widoczne konturu: najgrubsza klasa linii, która występuje masowo (>= 30 odcinków)."""
+def _klasy_linii(seg):
+    """Klasy grubości linii obecne na stronie (>= 4 odcinki), od najgrubszej. Linie widoczne
+    konturu to zwykle jedna z grubszych klas (Inventor: 0,54 pt), wymiary cieńsze."""
     if not len(seg):
-        return seg
+        return []
     szer, ile = np.unique(np.round(seg[:, 0], 2), return_counts=True)
-    masowe = [s for s, n in zip(szer, ile) if n >= 30 and s > 0]
-    if not masowe:
-        return seg
-    return seg[np.round(seg[:, 0], 2) >= max(masowe)]
+    return [float(w) for w, n in sorted(zip(szer, ile), reverse=True) if n >= 4 and w > 0]
 
 
 def _skupiska(seg, tol=0.8):
@@ -830,21 +905,114 @@ def _skupiska(seg, tol=0.8):
     return [seg[v] for v in grupy.values() if len(v) >= 4]
 
 
+def _zamkniete(g, tol=0.3):
+    """Czy skupisko odcinków tworzy zamknięte pętle (otwór, wycięcie) — każdy węzeł ma parzysty
+    stopień. Osie otworów, odnośniki, linie wymiarowe mają wolne końce."""
+    konce = [tuple(p) for p in np.vstack([g[:, 1:3], g[:, 3:5]])]
+    return all(len(k) % 2 == 0 for k in _klastry(konce, tol))
+
+
+def _prostokat_min(pts):
+    """Minimalny prostokąt otaczający (wypukła otoczka + obracanie): (boki rosnąco, kąt dłuższego boku)."""
+    spts = sorted(set(map(tuple, np.round(pts, 3))))
+    if len(spts) < 3:
+        d = np.ptp(np.array(spts), axis=0) if spts else np.zeros(2)
+        return np.sort(d), 0.0
+
+    def cr(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lo, up = [], []
+    for q in spts:
+        while len(lo) >= 2 and cr(lo[-2], lo[-1], q) <= 0:
+            lo.pop()
+        lo.append(q)
+    for q in reversed(spts):
+        while len(up) >= 2 and cr(up[-2], up[-1], q) <= 0:
+            up.pop()
+        up.append(q)
+    H = np.array(lo[:-1] + up[:-1])
+    best = None
+    for i in range(len(H)):
+        d = H[(i + 1) % len(H)] - H[i]
+        n = math.hypot(*d)
+        if n < 1e-9:
+            continue
+        u = d / n
+        a = H @ u
+        b = H @ np.array([-u[1], u[0]])
+        pole = np.ptp(a) * np.ptp(b)
+        if best is None or pole < best[0]:
+            kat = math.atan2(u[1], u[0]) if np.ptp(a) >= np.ptp(b) else math.atan2(u[0], -u[1])
+            best = (pole, np.sort([np.ptp(a), np.ptp(b)]), kat)
+    return best[1], best[2]
+
+
+_SIATKA_ODCINKOW = [None, None]   # (seg, siatka) ostatniego zbioru — ICP pyta wiele razy o ten sam
+
+
 def _odl_do_odcinkow(P, seg):
-    """Odległość każdego punktu P do najbliższego odcinka seg ([., x1, y1, x2, y2]) + ten punkt."""
+    """Odległość każdego punktu P do najbliższego odcinka seg ([., x1, y1, x2, y2, ...]) + ten punkt.
+    Dla dużych zbiorów (blacha z setkami otworów) — siatka kubełkowa: najpierw odcinki z sąsiednich
+    oczek; punkt, dla którego najbliższy znaleziony jest dalej niż oczko, liczony dokładnie po wszystkich."""
+    if len(P) * len(seg) > 3_000_000 and len(seg) > 500:
+        return _odl_siatka(P, seg)
+    return _odl_brute(P, seg)
+
+
+def _odl_siatka(P, seg):
+    if _SIATKA_ODCINKOW[0] is not seg:
+        A, B = seg[:, 1:3], seg[:, 3:5]
+        lo = np.minimum(A, B).min(0)
+        rozm = np.maximum(A, B).max(0) - lo
+        C = max(2.0, float(max(rozm)) / 150)
+        i0 = np.floor((np.minimum(A, B) - lo) / C).astype(int)
+        i1 = np.floor((np.maximum(A, B) - lo) / C).astype(int)
+        kubly = {}
+        for k in range(len(seg)):
+            for gx in range(i0[k, 0], i1[k, 0] + 1):
+                for gy in range(i0[k, 1], i1[k, 1] + 1):
+                    kubly.setdefault((gx, gy), []).append(k)
+        _SIATKA_ODCINKOW[:] = [seg, (lo, C, {kl: np.array(v) for kl, v in kubly.items()}, {})]
+    lo, C, kubly, sasiedztwo = _SIATKA_ODCINKOW[1]
+    odl, naj = np.full(len(P), np.inf), np.zeros((len(P), 2))
+    oczka = np.floor((P - lo) / C).astype(int)
+    klucze, odwr = np.unique(oczka, axis=0, return_inverse=True)
+    odwr = odwr.ravel()
+    kolejnosc = np.argsort(odwr, kind="stable")
+    granice = np.searchsorted(odwr[kolejnosc], np.arange(len(klucze) + 1))
+    for u, (gx, gy) in enumerate(klucze):
+        idx = kolejnosc[granice[u]:granice[u + 1]]
+        kand = sasiedztwo.get((gx, gy))
+        if kand is None:
+            listy = [kubly[(gx + dx, gy + dy)] for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (gx + dx, gy + dy) in kubly]
+            kand = np.unique(np.concatenate(listy)) if listy else np.zeros(0, dtype=int)
+            sasiedztwo[(gx, gy)] = kand
+        if len(kand):
+            o, q = _odl_brute(P[idx], seg[kand])
+            odl[idx], naj[idx] = o, q
+    daleko = ~(odl <= C)          # najbliższy spoza sąsiedztwa mógłby być bliżej — liczymy dokładnie
+    if daleko.any():
+        o, q = _odl_brute(P[daleko], seg)
+        odl[daleko], naj[daleko] = o, q
+    return odl, naj
+
+
+def _odl_brute(P, seg):
     A, B = seg[:, 1:3], seg[:, 3:5]
     d = B - A
     dd = (d * d).sum(1)
     dd[dd == 0] = 1e-12
     odl, naj = np.empty(len(P)), np.empty((len(P), 2))
-    for i in range(0, len(P), 1000):
-        p = P[i:i + 1000, None, :]
+    blok = max(1, 2_000_000 // max(1, len(seg)))
+    for i in range(0, len(P), blok):
+        p = P[i:i + blok, None, :]
         t = np.clip(((p - A) * d).sum(2) / dd, 0, 1)
         q = A + d * t[..., None]
         r = np.hypot(q[..., 0] - p[..., 0], q[..., 1] - p[..., 1])
         j = r.argmin(1)
-        odl[i:i + 1000] = r[np.arange(len(j)), j]
-        naj[i:i + 1000] = q[np.arange(len(j)), j]
+        odl[i:i + blok] = r[np.arange(len(j)), j]
+        naj[i:i + blok] = q[np.arange(len(j)), j]
     return odl, naj
 
 
@@ -859,78 +1027,347 @@ def _probki_dxf(path):
     return np.vstack(pts) if pts else np.zeros((0, 2))
 
 
-def _dopasuj(P, seg, skala):
-    """Nałożenie punktów DXF (mm) na odcinki widoku (pt) przy znanej skali: 8 orientacji (obrót co
-    90° i lustro) x 3 punkty startowe, dosunięcie metodą ICP (samo przesunięcie). Najpierw krótka
-    przymiarka wszystkich wariantów, potem dokładne dopasowanie trzech najlepszych. Wariant bez
-    lustra wygrywa, jeśli pasuje prawie tak samo (części symetryczne).
-    Zwraca (p95 mm, Q punkty na stronie, odchyłki mm, lustro, obrót w stopniach)."""
-    s = 72 / 25.4 / skala
-    lo = np.array([seg[:, [1, 3]].min(), seg[:, [2, 4]].min()])
-    hi = np.array([seg[:, [1, 3]].max(), seg[:, [2, 4]].max()])
-    rozm_widoku = hi - lo
-
-    def icp(R, t, iteracje):
-        for _ in range(iteracje):
-            r, naj = _odl_do_odcinkow(R + t, seg)
-            ok = r < max(3 * np.median(r), 0.3)
-            krok = (naj[ok] - (R + t)[ok]).mean(0) if ok.any() else np.zeros(2)
-            t = t + krok
-            if math.hypot(*krok) < 1e-4:
-                break
-        r, _ = _odl_do_odcinkow(R + t, seg)
-        return float(np.percentile(r, 95)) / s, t
-
-    rzadkie = P[::max(1, len(P) // 200)]
-    geste = P[::max(1, len(P) // 600)]
-    warianty = []
+def _orientacje(P, cel=None):
+    """Macierze 2x2 orientacji DXF (bez skali): obroty co 90°, lustro, plus kąt wyrównujący
+    minimalne prostokąty otaczające DXF i widoku (widok obrócony o dowolny kąt)."""
+    katy = {0.0, 90.0, 180.0, 270.0}
+    out = []
+    if cel is not None and len(cel):
+        _, a_dxf = _prostokat_min(P)
+        _, a_wid = _prostokat_min(np.vstack([cel[:, 1:3], cel[:, 3:5]]) * np.array([1, -1]))
+        for lustro in (False, True):
+            a0 = math.pi - a_dxf if lustro else a_dxf
+            baza = math.degrees(a_wid - a0) % 90
+            if 0.5 < baza < 89.5:
+                for k in range(4):
+                    out.append((lustro, (baza + 90 * k) % 360))
     for lustro in (False, True):
-        for obrot in range(4):
-            M = np.diag([-1.0, 1.0]) if lustro else np.eye(2)
-            for _ in range(obrot):
-                M = np.array([[0.0, -1.0], [1.0, 0.0]]) @ M
-            M = np.diag([s, -s]) @ M                                   # mm -> pt, oś y w dół
-            R = rzadkie @ M.T
-            if np.any(np.abs(np.ptp(R, axis=0) - rozm_widoku) > 0.1 * rozm_widoku + 2):
-                continue                                               # obrót nie pasuje do proporcji widoku
-            for t in (lo - R.min(0), hi - R.max(0), (lo + hi - R.min(0) - R.max(0)) / 2):
-                p95, t = icp(R, t, 8)
-                warianty.append((p95, lustro, obrot, M, t))
-    if not warianty:
-        return float("inf"), P, np.full(len(P), np.inf), False, 0
-    warianty.sort(key=lambda w: w[0])
-    dokladne = []
-    for _, lustro, obrot, M, t in warianty[:3]:
-        p95, t = icp(geste @ M.T, t, 40)
-        dokladne.append((p95, lustro, obrot, M, t))
-    dokladne.sort(key=lambda w: w[0])
-    best = dokladne[0]
-    bez_lustra = [w for w in dokladne if not w[1]]
-    if best[1] and bez_lustra and bez_lustra[0][0] <= best[0] + 0.3:
-        best = bez_lustra[0]
-    p95, lustro, obrot, M, t = best
-    Q = P @ M.T + t
-    r, _ = _odl_do_odcinkow(Q, seg)
-    return p95, Q, r / s, lustro, obrot * 90
+        for k in katy:
+            out.append((lustro, k))
+    macierze = []
+    for lustro, kat in out:
+        c, s_ = math.cos(math.radians(kat)), math.sin(math.radians(kat))
+        M = np.array([[c, -s_], [s_, c]]) @ (np.diag([-1.0, 1.0]) if lustro else np.eye(2))
+        macierze.append((lustro, kat, M))
+    return macierze
 
 
-def _odl_do_punktow(P, Q, tol):
-    """Odległość każdego punktu P do najbliższego punktu Q (siatka), obcięta do 2*tol."""
-    siatka = {}
-    for i, (x, y) in enumerate(Q):
-        siatka.setdefault((math.floor(x / tol), math.floor(y / tol)), []).append(i)
-    out = np.full(len(P), 2.0 * tol)
-    for k, (x, y) in enumerate(P):
-        cx, cy = math.floor(x / tol), math.floor(y / tol)
-        naj = 2.0 * tol
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for i in siatka.get((cx + dx, cy + dy), ()):
-                    d = math.hypot(Q[i][0] - x, Q[i][1] - y)
-                    if d < naj:
-                        naj = d
-        out[k] = naj
+def _raster(pts, x0, y0, krok, ksztalt):
+    """Punkty (pt) -> siatka 0/1 o oczku krok, początek (x0, y0)."""
+    img = np.zeros(ksztalt, dtype=np.float32)
+    ij = np.floor((pts - (x0, y0)) / krok).astype(int)
+    ok = (ij[:, 0] >= 0) & (ij[:, 0] < ksztalt[1]) & (ij[:, 1] >= 0) & (ij[:, 1] < ksztalt[0])
+    img[ij[ok, 1], ij[ok, 0]] = 1.0
+    return img
+
+
+def _probki_odcinkow(seg, krok):
+    if not len(seg):
+        return np.zeros((0, 2))
+    A, B = seg[:, 1:3], seg[:, 3:5]
+    n = np.maximum(2, (np.hypot(*(B - A).T) / krok).astype(int) + 2)
+    return np.vstack([np.linspace(a, b, k) for a, b, k in zip(A, B, n)])
+
+
+def _wstepne_ustawienia(P, cel, skala, okno, ile=3, caly_arkusz=False):
+    """Korelacja FFT: obraz linii rysunku w oknie vs obraz DXF w każdej orientacji -> najlepsze
+    (ocena = odsetek punktów DXF trafiających w linie, M, t). Siatka max ~350-600 oczek na bok."""
+    s = 72 / 25.4 / skala
+    x0, y0, x1, y1 = okno
+    krok = max(0.5, max(x1 - x0, y1 - y0) / (600 if caly_arkusz else 350))
+    H, W = int((y1 - y0) / krok) + 2, int((x1 - x0) / krok) + 2
+    tlo = _raster(_probki_odcinkow(cel, krok / 2), x0, y0, krok, (H, W))
+    pogr = tlo.copy()                                     # pogrubienie o 1 oczko: tolerancja położenia
+    pogr[1:, :] = np.maximum(pogr[1:, :], tlo[:-1, :])
+    pogr[:-1, :] = np.maximum(pogr[:-1, :], tlo[1:, :])
+    tlo = pogr.copy()
+    pogr[:, 1:] = np.maximum(pogr[:, 1:], tlo[:, :-1])
+    pogr[:, :-1] = np.maximum(pogr[:, :-1], tlo[:, 1:])
+    F = np.fft.rfft2(pogr)
+    rzadkie = P[::max(1, len(P) // 3000)]
+    wyniki = []
+    for lustro, kat, M0 in _orientacje(P, None if caly_arkusz else cel):
+        M = np.diag([s, -s]) @ M0                          # mm -> pt, oś y strony w dół
+        X = rzadkie @ M.T
+        mn = X.min(0)
+        rozm = X.max(0) - mn
+        if rozm[0] > (x1 - x0) + 2 * krok or rozm[1] > (y1 - y0) + 2 * krok:
+            continue
+        szablon = _raster(X - mn, 0, 0, krok, (H, W))
+        ile_pkt = szablon.sum()
+        if ile_pkt < 5:
+            continue
+        kor = np.fft.irfft2(F * np.conj(np.fft.rfft2(szablon)), s=(H, W))
+        hs, ws = int(rozm[1] / krok) + 1, int(rozm[0] / krok) + 1
+        kor = kor[:max(1, H - hs + 1), :max(1, W - ws + 1)]
+        dy, dx = np.unravel_index(int(kor.argmax()), kor.shape)
+        t = np.array([x0 + dx * krok, y0 + dy * krok]) - mn
+        wyniki.append((float(kor[dy, dx] / ile_pkt), lustro, kat, M, t))
+    wyniki.sort(key=lambda w: -w[0])
+    # Orientacje o podobnej korelacji (np. prostokąt z jedną małą fazą: wszystkie 8 wyglądają w zgrubnej
+    # siatce tak samo) sprawdzamy WSZYSTKIE — o wyborze decyduje dopiero dokładny pomiar wektorowy.
+    if wyniki:
+        wyniki = [w for w in wyniki if w[0] >= wyniki[0][0] - 0.1][:16] or wyniki[:ile]
+    # doszukanie przesunięcia na drobnej siatce (~0,25 pt): zgrubne oczko bywa większe niż odstęp
+    # linii podwójnych (krawędź ukosu 7 mm obok obrysu) — ICP startujące o oczko obok łapie złą linię
+    out = []
+    for ocena, lustro, kat, M, t in wyniki:
+        out.append((ocena, lustro, kat, M, t + _doszukaj(rzadkie @ M.T + t, cel, krok)))
     return out
+
+
+def _doszukaj(X, cel, krok):
+    """Najlepsze przesunięcie X w zakresie ±krok na drobnej siatce (krok/5, min. 0,1 pt): odsetek
+    punktów trafiających w (pogrubione o 1 oczko) linie rysunku. Zwraca poprawione przesunięcie."""
+    f = max(0.1, krok / 5)
+    lo, hi = X.min(0) - 2 * krok, X.max(0) + 2 * krok
+    H, W = int((hi[1] - lo[1]) / f) + 2, int((hi[0] - lo[0]) / f) + 2
+    if H * W > 6_000_000:
+        f = math.sqrt((hi[1] - lo[1]) * (hi[0] - lo[0]) / 6_000_000)
+        H, W = int((hi[1] - lo[1]) / f) + 2, int((hi[0] - lo[0]) / f) + 2
+    siatka = _raster(_probki_odcinkow(_cel_w_oknie(cel, (lo[0], lo[1], hi[0], hi[1]), 0), f / 2), lo[0], lo[1], f, (H, W))
+    pogr = siatka.copy()
+    pogr[1:, :] = np.maximum(pogr[1:, :], siatka[:-1, :])
+    pogr[:-1, :] = np.maximum(pogr[:-1, :], siatka[1:, :])
+    siatka = pogr.copy()
+    pogr[:, 1:] = np.maximum(pogr[:, 1:], siatka[:, :-1])
+    pogr[:, :-1] = np.maximum(pogr[:, :-1], siatka[:, 1:])
+    n = int(krok / f) + 1
+    przes = np.arange(-n, n + 1) * f
+    DX, DY = np.meshgrid(przes, przes)
+    DX, DY = DX.ravel(), DY.ravel()
+    ij = np.floor((X - lo) / f).astype(int)
+    trafienia = np.zeros(len(DX))
+    for k in range(len(DX)):
+        jj = ij[:, 0] + int(round(DX[k] / f))
+        ii = ij[:, 1] + int(round(DY[k] / f))
+        ok = (ii >= 0) & (ii < H) & (jj >= 0) & (jj < W)
+        trafienia[k] = pogr[ii[ok], jj[ok]].sum()
+    najlepsze = np.flatnonzero(trafienia >= trafienia.max() - 1e-9)
+    k = najlepsze[np.argmin(np.hypot(DX[najlepsze], DY[najlepsze]))]   # remis -> najmniejsze przesunięcie
+    return np.array([DX[k], DY[k]])
+
+
+def _icp(X0, cel, iteracje=40, obrot=True):
+    """Sztywne ICP na wektorach: przesunięcie + (opcjonalnie) mały obrót, łącznie do 3°.
+    X0 — punkty DXF już ustawione na stronie. Zwraca (Mc, tc) do X = X0 @ Mc.T + tc."""
+    Mc, tc = np.eye(2), np.zeros(2)
+    kat_suma = 0.0
+    X = X0
+    for it in range(iteracje):
+        r, naj = _odl_do_odcinkow(X, cel)
+        # próg odrzucania maleje od ~3 pt do 0,5 pt: punkty lekko odsunięte (start z dokładnością oczka
+        # siatki) są najpierw PRZYCIĄGANE, a nie wyrzucane — inaczej wydłużony prostokąt zostawał
+        # przesunięty wzdłuż długiego boku (krótkie boki odrzucone jako "obce")
+        ok = r < max(3 * np.median(r), 3.0 * 0.75 ** it, 0.5)
+        if ok.sum() < 3:
+            break
+        a, b = X[ok], naj[ok]
+        ca, cb = a.mean(0), b.mean(0)
+        fi = 0.0
+        if obrot:
+            u, v = a - ca, b - cb
+            fi = math.atan2(float((u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]).sum()), float((u * v).sum()))
+            if abs(kat_suma + fi) > math.radians(3):
+                fi = 0.0
+        kat_suma += fi
+        Rm = np.array([[math.cos(fi), -math.sin(fi)], [math.sin(fi), math.cos(fi)]])
+        t = cb - ca @ Rm.T
+        X = X @ Rm.T + t
+        Mc, tc = Rm @ Mc, Rm @ tc + t
+        if math.hypot(*(cb - ca)) < 1e-4 and abs(fi) < 1e-7:
+            break
+    return Mc, tc
+
+
+def _dopasuj(P, cel, skala, okno, caly_arkusz=False):
+    """Najlepsze ułożenie DXF na liniach `cel` (pt) w `okno`. Zwraca słownik albo None."""
+    s = 72 / 25.4 / skala
+    geste = P[::max(1, len(P) // 600)]
+    rzadkie = P[::max(1, len(P) // 200)]
+    tol = tolerancja_nakladki(skala)
+
+    def blisko(X):
+        """Tylko linie rysunku w okolicy ułożonego DXF (na całej stronie bywa ich dziesiątki tysięcy)."""
+        lo_, hi_ = X.min(0), X.max(0)
+        z = 0.05 * float(max(hi_ - lo_)) + 10
+        return _cel_w_oknie(cel, (lo_[0], lo_[1], hi_[0], hi_[1]), z)
+
+    wstepne = []
+    for ocena0, lustro, kat, M, t in _wstepne_ustawienia(P, cel, skala, okno, caly_arkusz=caly_arkusz):
+        if ocena0 < 0.3:
+            continue                                   # mniej niż 30% DXF trafia w linie — to nie ten widok
+        lok = blisko(rzadkie @ M.T + t)
+        if not len(lok):
+            continue
+        Mc, tc = _icp(rzadkie @ M.T + t, lok, iteracje=12)          # szybki etap dla każdej orientacji
+        r, _ = _odl_do_odcinkow(rzadkie @ M.T @ Mc.T + Mc @ t + tc, lok)
+        wstepne.append((int((r / s > tol).sum()), float(np.minimum(r / s, 20).mean()), lustro, Mc @ M,
+                        Mc @ t + tc, ocena0))
+    wstepne.sort(key=lambda k: (k[0], k[1]))
+    kandydaci = []
+    for _, _, lustro, M, t, ocena0 in wstepne[:3]:                   # pełny etap dla trzech najlepszych
+        lok = blisko(geste @ M.T + t)
+        Mc, tc = _icp(geste @ M.T + t, lok)
+        r, _ = _odl_do_odcinkow(geste @ M.T @ Mc.T + Mc @ t + tc, lok)
+        kandydaci.append((int((r / s > tol).sum()), float(np.minimum(r / s, 20).mean()), lustro, Mc @ M,
+                          Mc @ t + tc, ocena0))
+    # wariant bez lustra zawsze w pełnym etapie (reguła "lustro tylko, gdy bez lustra nie pasuje")
+    if wstepne and all(k[2] for k in wstepne[:3]):
+        bez = [k for k in wstepne if not k[2]]
+        if bez:
+            _, _, lustro, M, t, ocena0 = bez[0]
+            lok = blisko(geste @ M.T + t)
+            Mc, tc = _icp(geste @ M.T + t, lok)
+            r, _ = _odl_do_odcinkow(geste @ M.T @ Mc.T + Mc @ t + tc, lok)
+            kandydaci.append((int((r / s > tol).sum()), float(np.minimum(r / s, 20).mean()), lustro, Mc @ M,
+                              Mc @ t + tc, ocena0))
+    if not kandydaci:
+        return None
+    # najpierw najmniej punktów poza tolerancją (rozstrzyga orientację przy małych asymetriach), potem średnia
+    kandydaci.sort(key=lambda k: (k[0], k[1]))
+    best = kandydaci[0]
+    bez_lustra = [k for k in kandydaci if not k[2]]
+    if best[2] and bez_lustra and bez_lustra[0][0] == 0:
+        # część symetryczna: skoro DXF BEZ lustra mieści się w tolerancji, lustro nie ma znaczenia
+        best = bez_lustra[0]
+    _, ocena, lustro, M, t, korelacja = best
+    Q = P @ M.T + t
+    r, _ = _odl_do_odcinkow(Q, blisko(Q))
+    obrot = math.degrees(math.atan2(-M[1, 0], M[0, 0])) % 360      # kierunek osi X DXF na stronie (oś y w górę)
+    return dict(ocena=float(np.minimum(r / s, 20).mean()), mediana=float(np.median(r)) / s, Q=Q, r=r / s,
+                lustro=lustro, obrot=round(obrot, 1), skala=skala, korelacja=korelacja)
+
+
+def _etykiety_skal(tekst):
+    """Skale widoków z tekstu rysunku: "( 1 : 10 )", "SKALA 1:10", "Scale 1 : 10", "1:2,5"."""
+    out = set()
+    for m in re.finditer(r"(?:\(\s*|SKALA\s*:?\s*|SCALE\s*:?\s*|M[ÅA]LESTOKK\s*:?\s*)1\s*:\s*([\d]+(?:[,\.]\d+)?)",
+                         tekst, re.I):
+        try:
+            k = float(m.group(1).replace(",", "."))
+        except ValueError:
+            continue
+        if 0.1 <= k <= 500:
+            out.add(k)
+    return sorted(out)
+
+
+def _cel_w_oknie(baza, okno, zapas):
+    x0, y0, x1, y1 = okno
+    m = ((baza[:, [1, 3]].max(1) >= x0 - zapas) & (baza[:, [1, 3]].min(1) <= x1 + zapas)
+         & (baza[:, [2, 4]].max(1) >= y0 - zapas) & (baza[:, [2, 4]].min(1) <= y1 + zapas))
+    return baza[m]
+
+
+def nakladka(dxf_path, pdf_path):
+    """Porównanie 1:1 konturu DXF z widokiem na rysunku PDF. Zwraca None, gdy na rysunku nie ma
+    widoku pasującego do DXF (wtedy DXF jest NIEZWERYFIKOWANY), inaczej słownik z wynikiem."""
+    P = _probki_dxf(dxf_path)
+    if len(P) < 10:
+        return None
+    rozm, _ = _prostokat_min(P)
+    if rozm[0] < 1:
+        return None
+    best = None
+    doc = fitz.open(pdf_path)
+    try:
+        strony = []
+        for nr, strona in enumerate(doc):
+            seg = _pdf_odcinki(strona)
+            baza = seg[(seg[:, 5] == 0) & (seg[:, 6] == 0)] if len(seg) else seg   # bez strzałek i kresek
+            etykiety = _etykiety_skal(strona.get_text())
+            strony.append((nr, strona.rect, baza, etykiety))
+
+        def sprobuj(nr, k, cel, okno, zrodlo):
+            nonlocal best
+            if not len(cel):
+                return
+            wynik = _dopasuj(P, cel, k, okno, caly_arkusz=zrodlo == "strona")
+            if wynik and (best is None or wynik["ocena"] < best["ocena"]):
+                wynik.update(strona=nr, cel=cel, zrodlo=zrodlo, skala_opisana=k in etykiety_str[nr])
+                best = wynik
+
+        etykiety_str = {nr: et for nr, _, _, et in strony}
+        # (a) skupiska linii o wymiarach DXF w skali widoku
+        kandydaci = []
+        for nr, rect, baza, etykiety in strony:
+            skale = etykiety or SKALE_RYSUNKU
+            for w in _klasy_linii(baza):
+                klasa = baza[np.round(baza[:, 0], 2) == w]
+                for g in _skupiska(klasa):
+                    bb, _ = _prostokat_min(np.vstack([g[:, 1:3], g[:, 3:5]]))
+                    for k in skale:
+                        iloraz = bb * k * 25.4 / 72 / rozm
+                        if np.all(iloraz > 0.97) and np.all(iloraz < 1.4):  # widok może mieć doklejone adnotacje
+                            kandydaci.append((float(np.abs(iloraz - 1).sum()), nr, k, g, klasa))
+        kandydaci.sort(key=lambda c: c[0])
+        for _, nr, k, g, klasa in kandydaci[:4]:
+            okno = (g[:, [1, 3]].min(), g[:, [2, 4]].min(), g[:, [1, 3]].max(), g[:, [2, 4]].max())
+            zapas = 0.05 * max(okno[2] - okno[0], okno[3] - okno[1]) + 2
+            okno = (okno[0] - zapas, okno[1] - zapas, okno[2] + zapas, okno[3] + zapas)
+            sprobuj(nr, k, _cel_w_oknie(klasa, okno, 0), okno, "widok")
+            if best and best["ocena"] < 0.3 * tolerancja_nakladki(k):
+                break
+        # (b) zapas: korelacja obrazu całej strony, każda klasa linii i skala
+        if best is None or best["mediana"] > 0.5 * tolerancja_nakladki(best["skala"]):
+            for nr, rect, baza, etykiety in strony:
+                for k in (etykiety or SKALE_RYSUNKU):
+                    rozm_pt = rozm * 72 / 25.4 / k
+                    if rozm_pt[1] > max(rect.width, rect.height) or rozm_pt[0] < 15:
+                        continue                          # DXF w tej skali nie mieści się albo jest za mały
+                    for w in _klasy_linii(baza):
+                        klasa = baza[np.round(baza[:, 0], 2) == w]
+                        okno = (rect.x0, rect.y0, rect.x1, rect.y1)
+                        sprobuj(nr, k, klasa, okno, "strona")
+    finally:
+        doc.close()
+    if best is None or best["korelacja"] < 0.3:
+        return None
+    k = best["skala"]
+    tol = tolerancja_nakladki(k, best["r"])
+    Q, r, s = best["Q"], best["r"], 72 / 25.4 / k
+    best["tol"] = tol
+    # punkty DXF, których nie ma na rysunku
+    best["rozne_dxf"] = _grupuj_punkty(P[r > tol], r[r > tol])
+    # zamknięte elementy wewnątrz widoku (otwory, wycięcia), których nie ma w DXF
+    best["brak_w_dxf"] = []
+    lo, hi = Q.min(0), Q.max(0)
+    cel = best.pop("cel")
+    wnetrze = []
+    for g in _skupiska(cel):
+        glo = np.minimum(g[:, 1:3], g[:, 3:5]).min(0)
+        ghi = np.maximum(g[:, 1:3], g[:, 3:5]).max(0)
+        if np.all(glo > lo + 0.5) and np.all(ghi < hi - 0.5) and _zamkniete(g):
+            wnetrze.append(g)
+    if wnetrze:
+        A, *_ = np.linalg.lstsq(np.c_[P, np.ones(len(P))], Q, rcond=None)    # DXF -> strona
+        # raster DXF (oczko = tol/3, pogrubiony o 3 oczka ~ tol): "czy w odległości tol jest DXF?"
+        c = tol * s / 3
+        lo_r = Q.min(0) - 5 * c
+        Hr, Wr = int(np.ptp(Q[:, 1]) / c) + 11, int(np.ptp(Q[:, 0]) / c) + 11
+        Qg = np.vstack([np.linspace(a, b, max(2, int(math.dist(a, b) / (c / 2)) + 1)) for a, b in zip(Q, Q[1:])])
+        jest = _raster(Qg, lo_r[0], lo_r[1], c, (Hr, Wr)) > 0
+        for _ in range(3):
+            p_ = jest.copy()
+            p_[1:, :] |= jest[:-1, :]
+            p_[:-1, :] |= jest[1:, :]
+            p_[:, 1:] |= jest[:, :-1]
+            p_[:, :-1] |= jest[:, 1:]
+            jest = p_
+        for g in wnetrze:
+            probki = _probki_odcinkow(g, s)
+            ij = np.floor((probki - lo_r) / c).astype(int)
+            w_oknie = (ij[:, 0] >= 0) & (ij[:, 0] < Wr) & (ij[:, 1] >= 0) & (ij[:, 1] < Hr)
+            trafione = np.zeros(len(probki), dtype=bool)
+            trafione[w_oknie] = jest[ij[w_oknie, 1], ij[w_oknie, 0]]
+            if trafione.mean() > 0.5:
+                continue                                   # element jest w DXF
+            srodek = np.linalg.solve(A[:2].T, probki.mean(0) - A[2])
+            rozmiar = float(max(np.ptp(probki[:, 0]), np.ptp(probki[:, 1]))) / s
+            best["brak_w_dxf"].append((rozmiar, tuple(srodek)))
+        best["brak_w_dxf"].sort(reverse=True)
+    return best
 
 
 def _grupuj_punkty(punkty, odl):
@@ -944,113 +1381,49 @@ def _grupuj_punkty(punkty, odl):
     return sorted(miejsca, reverse=True)
 
 
-def nakladka(dxf_path, pdf_path):
-    """Porównanie 1:1 konturu DXF z widokiem na rysunku PDF. Zwraca None, gdy na rysunku nie ma
-    widoku o wymiarach DXF w żadnej typowej skali, inaczej słownik z wynikiem."""
-    P = _probki_dxf(dxf_path)
-    if len(P) < 10:
-        return None
-    rozm = np.sort(P.max(0) - P.min(0))
-    if rozm[0] < 1:
-        return None
-    doc = fitz.open(pdf_path)
-    kandydaci = []
-    try:
-        for nr, strona in enumerate(doc):
-            etykiety = [float(m.replace(",", ".")) for m in
-                        re.findall(r"\(\s*1\s*:\s*([\d,\.]+)\s*\)", strona.get_text())]
-            skale = sorted(set(SKALE_RYSUNKU) | set(etykiety))
-            for g in _skupiska(_linie_grube(_pdf_odcinki(strona))):
-                bb = np.sort([np.ptp(g[:, [1, 3]]), np.ptp(g[:, [2, 4]])])
-                for k in skale:
-                    mm = bb * k * 25.4 / 72
-                    blad = np.abs(mm - rozm) / rozm
-                    if np.all(blad < 0.08):
-                        kandydaci.append((float(blad.sum()) - (0.01 if k in etykiety else 0), nr, k, g))
-    finally:
-        doc.close()
-    if not kandydaci:
-        return None
-    kandydaci.sort(key=lambda c: c[0])
-    best = None
-    for _, nr, k, g in kandydaci[:3]:
-        p95, Q, r, lustro, obrot = _dopasuj(P, g, k)
-        if best is None or p95 < best["p95"]:
-            best = dict(p95=p95, Q=Q, r=r, lustro=lustro, obrot=obrot, strona=nr, skala=k, seg=g)
-    g, Q, r, s = best["seg"], best["Q"], best["r"], 72 / 25.4 / best["skala"]
-    # punkty DXF, których nie ma na rysunku
-    best["rozne_dxf"] = _grupuj_punkty(P[r > NAKLADKA_TOL], r[r > NAKLADKA_TOL])
-    # linie rysunku (w tym widoku), których nie ma w DXF — przeliczone do współrzędnych DXF
-    probki = np.vstack([np.linspace(a, b, max(2, int(math.dist(a, b) / s) + 1))
-                        for a, b in zip(g[:, 1:3], g[:, 3:5])])
-    # DXF zagęszczony do 0,2 mm, żeby odległość do najbliższego punktu ≈ odległość do konturu
-    Qg = np.vstack([np.linspace(a, b, max(2, int(math.dist(a, b) / (0.2 * s)) + 1)) for a, b in zip(Q, Q[1:])])
-    d2 = _odl_do_punktow(probki, Qg, NAKLADKA_TOL * s) / s
-    A, *_ = np.linalg.lstsq(np.c_[P, np.ones(len(P))], Q, rcond=None)    # DXF -> strona
-    odwr = lambda q: np.linalg.solve(A[:2].T, (q - A[2]).T).T           # noqa: E731
-    brak = probki[d2 > NAKLADKA_TOL]
-    best["brak_w_dxf"] = []
-    if len(brak):
-        brak_mm = odwr(brak)
-        dl = {}
-        Qseg = np.c_[np.zeros(len(Q) - 1), Q[:-1], Q[1:]]
-        for gr in _klastry([tuple(p) for p in brak_mm], 5.0):
-            pts = brak_mm[gr]
-            wybrane = brak[np.array(gr)[np.linspace(0, len(gr) - 1, min(5, len(gr))).astype(int)]]
-            od_dxf = float(_odl_do_odcinkow(wybrane, Qseg)[0].max()) / s
-            dlug = float(np.ptp(pts[:, 0]) + np.ptp(pts[:, 1]))
-            if dlug >= 5:
-                best["brak_w_dxf"].append((dlug, od_dxf, tuple(pts[len(pts) // 2])))
-        best["brak_w_dxf"].sort(reverse=True)
-    best.pop("seg")
-    return best
-
-
 def ocen_nakladke(b, nak):
-    """Wynik nakładki -> (błędy, uwagi)."""
+    """Wynik nakładki -> (błędy, uwagi, potwierdzony_1do1)."""
     bl, uw = [], []
     obrobka = "o" in b["flags"]
-    ukos = "u" in b["flags"]
-    widok = f"strona {nak['strona'] + 1}, skala 1:{_mm(nak['skala'])}"
-    if nak["p95"] > NAKLADKA_ZLY:
-        bl.append(f".DXF: nakładka — kontur DXF nie pokrywa się z widokiem rysunku o tych wymiarach "
-                  f"({widok}; 95% punktów w odległości do {nak['p95']:.1f} mm)")
-        return bl, uw
+    tol = nak["tol"]
+    widok = (f"strona {nak['strona'] + 1}, skala 1:{_mm(nak['skala'])}"
+             + ("" if nak["skala_opisana"] else " (skala nieopisana na rysunku — dobrana)")
+             + f", tolerancja {_mm(tol)} mm")
+    if nak["mediana"] > NAKLADKA_ZLY * tol:
+        bl.append(f".DXF: nakładka — kontur DXF nie pokrywa się z widokiem rysunku ({widok}; połowa punktów "
+                  f"dalej niż {nak['mediana']:.1f} mm od linii rysunku)")
+        return bl, uw, False
     if nak["rozne_dxf"]:
         m = nak["rozne_dxf"]
         msg = (f".DXF: nakładka — DXF odbiega od rysunku 1:1 w {len(m)} miejscu(ach), maks. {m[0][0]:.1f} mm, "
                f"przy {_gdzie([p for _, p in m])} ({widok})")
         (uw if obrobka else bl).append(msg + (" — część z obróbką, możliwy naddatek" if obrobka else ""))
-    brak = [x for x in nak["brak_w_dxf"] if x[0] >= 10]
-    if brak:
-        # przy ukosowaniu krawędź ukosu leży tuż przy obrysie (do ~20 mm) — tego nie ma być w DXF
-        daleko = [x for x in brak if x[1] > 20 or not ukos]
-        if daleko:
-            bl.append(f".DXF: nakładka — na rysunku jest geometria, której nie ma w DXF ({len(daleko)} miejsc, "
-                      f"łącznie ~{sum(x[0] for x in daleko):.0f} mm), przy {_gdzie([x[2] for x in daleko])} "
-                      f"({widok}) — brakujący otwór/wycięcie albo linie, które nie są konturem (sprawdź podgląd)")
+    if nak["brak_w_dxf"]:
+        brak = nak["brak_w_dxf"]
+        bl.append(f".DXF: nakładka — na rysunku jest {len(brak)} zamknięty element (otwór/wycięcie, największy "
+                  f"~{brak[0][0]:.0f} mm), którego nie ma w DXF, przy {_gdzie([x[1] for x in brak])} ({widok})")
     if nak["lustro"]:
         uw.append(f".DXF: nakładka — DXF pasuje do rysunku dopiero po ODBICIU LUSTRZANYM ({widok}); "
                   f"sprawdź stronę gięcia/ukosu")
-    return bl, uw
+    return bl, uw, not bl and not nak["rozne_dxf"]
 
 
 def zapisz_nakladki_pdf(sciezka):
     """Zbiorczy PDF: strona rysunku z naniesionym konturem DXF (zielony = zgodny, czerwony = różnica)."""
     out = fitz.open()
-    for etykieta, pdf_path, nr, Q, r in NAKLADKI_PDF:
+    for etykieta, pdf_path, nr, Q, r, tol in NAKLADKI_PDF:
         with fitz.open(pdf_path) as src:
             out.insert_pdf(src, from_page=nr, to_page=nr)
         strona = out[-1]
         ksztalt = strona.new_shape()      # jeden kształt na stronę — tysiące kropek osobno trwałyby minuty
         for kolor, zly in (((0, 0.6, 0), False), ((0.9, 0, 0), True)):
             for i in range(len(Q) - 1):
-                if (r[i] > NAKLADKA_TOL) == zly and math.dist(Q[i], Q[i + 1]) < 3:
+                if (r[i] > tol) == zly and math.dist(Q[i], Q[i + 1]) < 3:
                     ksztalt.draw_line(Q[i], Q[i + 1])
             ksztalt.finish(color=kolor, width=1.6 if zly else 0.8)
         ksztalt.commit()
         strona.insert_text((20, 14), f"NAKLADKA DXF: {etykieta}  (zielony = zgodny z rysunkiem, czerwony = roznica "
-                           f"> {NAKLADKA_TOL:g} mm)", fontsize=9, color=(0.9, 0, 0))
+                           f"> {tol:.1f} mm)", fontsize=9, color=(0.9, 0, 0))
     if len(out):
         out.save(sciezka)
     out.close()
@@ -1082,7 +1455,7 @@ def _lista_faz(fazy):
     return ", ".join(f"{_mm(a)}x{_mm(b)}" + (f" ({n} szt.)" if n > 1 else "") for (a, b), n in licz.items())
 
 
-def ocen_kontur(b, kat, ana, tresc, kontur_zgodny_z_rysunkiem=False):
+def ocen_kontur(b, kat, ana, tresc, nakladka_stan=None, nak=None):
     """Zamienia wynik dxf_analiza (+ wymiary z rysunku PDF, jeśli jest) na listy
     (błędy, uwagi). Każdy komunikat zaczyna się od ".DXF:", żeby trafił do kolumny Plik."""
     bl, uw = [], []
@@ -1090,6 +1463,16 @@ def ocen_kontur(b, kat, ana, tresc, kontur_zgodny_z_rysunkiem=False):
     obrobka = "o" in b["flags"]
     gieta = "p" in b["flags"]
     przymiar = kat == "przygotowka" or re.search(r"PRZYMIAR|PRZYG", f"{b['title']} {b['desc']}", re.I)
+
+    if ana.get("pusty"):
+        bl.append(".DXF: kontur — w DXF nie ma żadnej geometrii na warstwach cięcia (pusty plik albo wszystko "
+                  "na warstwach pomijanych: wymiary, osie, gięcie)")
+    if ana.get("jednostki") in JEDNOSTKI_DXF:
+        # UWAGA, nie BŁĄD: liczby w pliku i tak porównujemy z BOM w mm (gabaryt) — prawdziwy błąd skali
+        # wyjdzie tam; to pole decyduje tylko, czy program CAM przy imporcie nie przeskaluje części.
+        uw.append(f".DXF: kontur — nagłówek DXF mówi, że jednostką są {JEDNOSTKI_DXF[ana['jednostki']]} "
+                  f"($INSUNITS={ana['jednostki']}), a nie milimetry — sprawdź, czy program wypalarki nie "
+                  f"przeskaluje części przy imporcie")
 
     if ana["duble"] >= 3:
         bl.append(f".DXF: podwójne linie — {ana['duble']} elementów narysowanych 2x w tym samym miejscu "
@@ -1105,14 +1488,13 @@ def ocen_kontur(b, kat, ana, tresc, kontur_zgodny_z_rysunkiem=False):
         bl.append(f".DXF: kontur — {len(ana['wolne'])} wolnych końców linii (kontur niedomknięty albo linia "
                   f"wystaje za narożnik), przy {_gdzie(ana['wolne'])}")
     if ana["rozgal"]:
-        msg = (f".DXF: kontur — {len(ana['rozgal'])} rozgałęzień (linia kończy się na innej linii albo 3+ linie "
-               f"w jednym punkcie), przy {_gdzie(ana['rozgal'])} — nieprzycięty narożnik po dorysowaniu fazy "
-               f"albo linie fazy/ukosu krawędzi, które laser wytnie")
-        if ukos or gieta:
-            uw.append(msg + " (część " + ("z ukosowaniem" if ukos else "gięta")
-                      + " — sprawdź, czy to linia " + ("ukosu" if ukos else "gięcia") + " na warstwie cięcia)")
-        else:
-            bl.append(msg)
+        # Zawsze BŁĄD, także przy ukosowaniu i gięciu: wzorcowy DXF części "p u" (PG4136348) ma sam
+        # obrys — linie ukosu/gięcia na warstwie cięcia laser by przeciął.
+        bl.append(f".DXF: kontur — {len(ana['rozgal'])} rozgałęzień (linia kończy się na innej linii albo 3+ "
+                  f"linie w jednym punkcie), przy {_gdzie(ana['rozgal'])} — nieprzycięty narożnik po dorysowaniu "
+                  f"fazy albo linia fazy/ukosu/gięcia na warstwie cięcia, którą laser wytnie"
+                  + (" (część z ukosowaniem/gięciem: te linie mają być na osobnej warstwie albo usunięte)"
+                     if ukos or gieta else ""))
     for fis, srodek in ana["wspolsrodkowe"]:
         msg = (f".DXF: otwory — współśrodkowe okręgi Ø{' / Ø'.join(_mm(f) for f in fis)} przy "
                f"{_gdzie([srodek])} — faza/pogłębienie otworu wyeksportowane do DXF, laser wytnie większy okrąg")
@@ -1140,19 +1522,56 @@ def ocen_kontur(b, kat, ana, tresc, kontur_zgodny_z_rysunkiem=False):
                              if reczny and not wsp and not zwymiarowany(fi)})
         eksp_bez = sorted({round(fi, 2) for fi, _, reczny, wsp in ana["okregi"]
                            if not reczny and not wsp and not zwymiarowany(fi)})
+        # Bez łagodzenia przy potwierdzonej nakładce: tolerancja nakładki (>= 1 mm) jest grubsza niż
+        # porównanie średnicy z wymiarem Ø (0,15 mm) — Ø15 zamiast Ø13 to tylko 1 mm na promieniu.
+        potw = nakladka_stan == "potwierdzony"
         if reczne_bez:
             bl.append(f".DXF: otwory — dorysowany otwór Ø{', Ø'.join(_mm(f) for f in reczne_bez)} (warstwa 0) "
-                      f"bez wymiaru Ø na rysunku PDF — produkcja nie wie o otworze")
+                      f"bez wymiaru Ø na rysunku PDF — produkcja nie wie o otworze"
+                      + (" (nakładka: otwór jest narysowany na rysunku w tym miejscu)" if potw else ""))
         if eksp_bez and tresc.get("fi"):   # stare rysunki bez wymiarów Ø — nie sprawdzamy
             bl.append(f".DXF: otwory — otwór Ø{', Ø'.join(_mm(f) for f in eksp_bez)} z DXF nie występuje "
-                      f"w wymiarach rysunku (Ø na rysunku: {', '.join(_mm(f) for f in sorted(set(tresc['fi'])))})")
+                      f"w wymiarach rysunku (Ø na rysunku: {', '.join(_mm(f) for f in sorted(set(tresc['fi'])))})"
+                      + (" — różnica mniejsza niż tolerancja nakładki, ale średnica nie zgadza się z wymiarem"
+                         if potw else ""))
 
     # --- fazy narożników z DXF vs notki faz na rysunku. Gdy nakładka 1:1 potwierdziła kontur, każdy
     # narożnik jest już sprawdzony geometrycznie, a notki "7 X 45° Chamfer" bywają fazami KRAWĘDZI
     # (ukos pod spaw w przekroju), których w konturze nie ma — wtedy tego porównania nie robimy.
-    if kontur_zgodny_z_rysunkiem:
-        return bl, uw
     fazy_dxf = ana["fazy"]
+    if nakladka_stan is not None:
+        # Widok znaleziony: brak całej fazy albo faza w złym miejscu wychodzi w nakładce (kilka mm).
+        # Notki bez żadnej podobnej fazy w konturze to zwykle fazy KRAWĘDZI (ukos pod spaw w przekroju) —
+        # pomijamy. Ale faza w DXF PRAWIE jak w notce (np. 11 zamiast 10) jest poniżej tolerancji
+        # nakładki — tę różnicę łapiemy tutaj, z tolerancją FAZA_TOL.
+        # tylko notki stojące przy dopasowanym widoku rozwinięcia — notki przy przekrojach (A-A, C-C)
+        # opisują fazy krawędzi pod spaw, nie narożniki konturu (wzorzec: PG4136348, "7,00 X 45° Chamfer")
+        notki = []
+        if nak is not None:
+            lo, hi = nak["Q"].min(0), nak["Q"].max(0)
+            zapas = np.array([60.0, 60.0])     # ~2 cm na papierze: notka z odnośnikiem stoi przy widoku
+            notki = [f for f in tresc.get("notki_faz", []) if f["strona"] == nak["strona"]
+                     and lo[0] - zapas[0] <= f["x"] <= hi[0] + zapas[0] and lo[1] - zapas[1] <= f["y"] <= hi[1] + zapas[1]]
+        for f in notki:
+            if max(f["nogi"]) <= FAZA_MIN_RYS:
+                continue                       # łamanie krawędzi
+            zgodne = [d for d in fazy_dxf if abs(d[0] - f["nogi"][0]) <= FAZA_TOL and abs(d[1] - f["nogi"][1]) <= FAZA_TOL]
+            if zgodne:
+                if f["ile"] and len(zgodne) < f["ile"]:
+                    (uw if ukos else bl).append(
+                        f".DXF: fazy — przy widoku rozwinięcia notka {f['tekst']} ({f['ile']} szt.), a w DXF takich "
+                        f"faz narożnika jest {len(zgodne)}")
+                continue
+            blisko = [d for d in fazy_dxf if abs(d[0] - f["nogi"][0]) <= 3 and abs(d[1] - f["nogi"][1]) <= 3]
+            if blisko:
+                bl.append(f".DXF: fazy — na rysunku faza {f['tekst']}, a w DXF {_lista_faz(blisko)} przy "
+                          f"{_gdzie([d[2] for d in blisko])} — różnica może być poniżej tolerancji nakładki, ale "
+                          f"wymiar fazy się nie zgadza")
+            else:
+                (uw if ukos else bl).append(
+                    f".DXF: fazy — przy widoku rozwinięcia jest notka fazy {f['tekst']}, a w konturze DXF nie ma "
+                    f"takiej fazy narożnika" + (" (część z ukosowaniem — może to faza krawędzi)" if ukos else ""))
+        return bl, uw
     lagodnie = ukos or obrobka
 
     def pasuje(n, m):
@@ -1391,6 +1810,70 @@ def dodaj_wiersze(folder, lista, poziom):
 
 
 # ---------------------------------------------------------------- kontrola
+def folder_niesprawdzony(folder, powod):
+    """Folder, którego nie dało się sprawdzić, MUSI być w raporcie jako błąd — nigdy cicho pominięty."""
+    nazwa = os.path.basename(folder.rstrip("\\/"))
+    WSZYSTKIE_WIERSZE.append(dict(folder=nazwa, pos="", part="(cały folder)", tytul="", poziom="BŁĄD", plik="",
+                                  rodzaj="folder niesprawdzony", opis=f"folder NIE został sprawdzony: {powod}"))
+    PODSUMOWANIE_FOLDEROW.append(dict(folder=nazwa, sciezka=folder, ok=0, bledy=1, uwagi=0, pozycji=0, stp="-",
+                                      stp_info=0, dxf_sprawdzone=0, dxf_bledne=[], dxf_uwagi=0, dxf_1do1=0,
+                                      dxf_wszystkie=0, dxf_niezweryf=[], dxf_rozne=[], niesprawdzony=powod))
+    return 1
+
+
+def autotest():
+    """Sprawdzenie na wzorcowej części, czy kontrola geometrii działa NA TYM KOMPUTERZE (wersje bibliotek,
+    zbudowany .exe): dobry DXF musi przejść nakładkę 1:1, zepsuty (bez fazy, przesunięty otwór) — nie,
+    przerwa w konturze musi zostać znaleziona. Wynik: dict(ok, opis)."""
+    import tempfile
+    import time
+    t0 = time.time()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            def dxf(nazwa, faza, otwor_x, przerwa=0.0):
+                d = ezdxf.new("R2010", units=ezdxf.units.MM)
+                m = d.modelspace()
+                pkt = [(0, 0), (200 - faza, 0)] + ([(200, faza)] if faza else []) + [(200, 100), (0, 100)]
+                for i, (a, b) in enumerate(zip(pkt, pkt[1:] + pkt[:1])):
+                    if i == 0 and przerwa:
+                        b = (b[0] - przerwa, b[1])
+                    m.add_line(a, b, dxfattribs={"layer": "Visible (ISO)"})
+                m.add_circle((otwor_x, 50), 10, dxfattribs={"layer": "Visible (ISO)"})
+                sciezka = os.path.join(tmp, nazwa)
+                d.saveas(sciezka)
+                return sciezka
+
+            dobry, zly, z_przerwa = dxf("dobry.dxf", 10, 50), dxf("zly.dxf", 0, 55), dxf("przerwa.dxf", 10, 50, 0.5)
+            doc = fitz.open()
+            strona = doc.new_page(width=842, height=595)
+            sk = 72 / 25.4 / 2                                       # widok 1:2
+            P = lambda x, y: fitz.Point(150 + x * sk, 400 - y * sk)  # noqa: E731
+            pkt = [(0, 0), (190, 0), (200, 10), (200, 100), (0, 100)]
+            for a, b in zip(pkt, pkt[1:] + pkt[:1]):
+                strona.draw_line(P(*a), P(*b), width=0.54)
+            strona.draw_circle(P(50, 50), 10 * sk, width=0.54)
+            strona.draw_line(P(0, -15), P(200, -15), width=0.36)
+            strona.insert_text((150, 120), "VIEW1 ( 1 : 2 )   4x n20   10 x 45°", fontsize=9)
+            rys = os.path.join(tmp, "rysunek.pdf")
+            doc.save(rys)
+            doc.close()
+
+            n = nakladka(dobry, rys)
+            if not n or n["rozne_dxf"] or n["brak_w_dxf"] or n["r"].max() > 0.2 or n["lustro"]:
+                return dict(ok=False, opis="poprawny DXF wzorcowy nie przeszedł nakładki 1:1")
+            n = nakladka(zly, rys)
+            if not n or not n["rozne_dxf"] or n["rozne_dxf"][0][0] < 4:
+                return dict(ok=False, opis="zepsuty DXF wzorcowy (brak fazy, przesunięty otwór) nie został wykryty")
+            if len(dxf_analiza(z_przerwa)["przerwy"]) != 1:
+                return dict(ok=False, opis="przerwa 0,5 mm w konturze wzorcowym nie została wykryta")
+            w = wymiary_rysunku("4x n20   10 x 45°")
+            if 20.0 not in w["fi"] or not any(f["nogi"] == (10.0, 10.0) for f in w["fazy"]):
+                return dict(ok=False, opis="odczyt wymiarów z tekstu rysunku nie działa")
+    except Exception as e:
+        return dict(ok=False, opis=f"wyjątek {type(e).__name__}: {e}")
+    return dict(ok=True, opis=f"wzorcowe DXF sprawdzone poprawnie ({time.time() - t0:.1f} s)")
+
+
 def sprawdz(folder):
     folder = folder.rstrip("\\/")
     print("\n" + "=" * 92)
@@ -1403,17 +1886,17 @@ def sprawdz(folder):
         top = os.listdir(folder)
     except OSError as e:
         print("  BŁĄD dostępu:", e)
-        return 1
+        return folder_niesprawdzony(folder, f"brak dostępu do folderu ({e})")
     xlsx = [f for f in top if f.lower().endswith((".xlsx", ".xlsm")) and not f.startswith("~$")]
     if not xlsx:
         print("  BŁĄD: brak pliku BOM (.xlsx) w folderze.")
-        return 1
+        return folder_niesprawdzony(folder, "brak pliku BOM (.xlsx) w folderze")
     if len(xlsx) > 1:
         print(f"  UWAGA: kilka xlsx, biorę {xlsx[0]}")
     bom, err = czytaj_bom(os.path.join(folder, xlsx[0]))
     if err:
         print("  BŁĄD BOM:", err)
-        return 1
+        return folder_niesprawdzony(folder, f"nie udało się odczytać BOM: {err}")
 
     bom_parts = {b["part"].upper() for b in bom}
     bom_asm = {b["part"].upper() for b in bom if "m" in b["flags"]}
@@ -1450,7 +1933,7 @@ def sprawdz(folder):
         uwagi_wstepne.append("brak pliku .stp/.step w folderze — kontrola geometrii 3D pominięta "
                               "(sam brak pliku nie jest błędem, nie wszystkie projekty go mają)")
 
-    bledy, uwagi, bez_stempla, bez_widoku = [], [], [], []
+    bledy, uwagi, bez_stempla, weryfikacje = [], [], [], []
     stp_info = []  # różnice z modelu .stp — tylko informacyjnie, nie są błędami
     uwagi.extend(uwagi_wstepne)
     ok = 0
@@ -1463,194 +1946,236 @@ def sprawdz(folder):
         dxf, pdf = f.get(".DXF"), f.get(".PDF")
         problemy = []
         etykieta = f"[{b['pos']}] {b['part']} ({b['title'] or b['desc'][:25] or kat})"
+        weryf = None
+        if dxf and not dxf["asm"]:
+            weryf = dict(folder=os.path.basename(folder), pos=b["pos"], part=b["part"], tytul=b["title"],
+                         plik=dxf["file"], potwierdzony=False, nakladka=None, kontur_ok=None, powod="")
+            if not GEO:
+                weryf["powod"] = "brak biblioteki ezdxf — geometria DXF nie jest sprawdzana"
+            elif not AUTOTEST["ok"]:
+                weryf["powod"] = f"AUTOTEST geometrii nie przeszedł na tym komputerze ({AUTOTEST['opis']})"
+        try:
 
-        # --- wymagane pliki wg kategorii
-        if kat == "purchased":
-            if not dxf and not pdf:
-                continue  # norma (93% w archiwum) — bez szumu
-        elif kat == "ramka":
-            if not pdf:
-                uwagi.append(f"{etykieta}: ramka tabliczki bez PDF — w archiwum 61% ma PDF, 20% nie; do decyzji")
-                continue
-        elif kat == "zlozenie":
-            if not pdf:
-                problemy.append("BRAK PDF złożenia")
-            if dxf:
-                uwagi.append(f"{etykieta}: złożenie ma DXF — rzadkie (szablony G BOLTON), sprawdź czy celowe")
-        elif kat == "blacha":
-            if not dxf:
-                if czy_krawedz_plaskownik(b):
-                    uwagi.append(f"{etykieta}: krawędź z paska {b['desc']} bez DXF — typowe dla GRADING "
-                                 f"(płaskownik, cięcie+ukos), ale flaga C w BOM by to potwierdziła (jest: "
-                                 f"'{''.join(sorted(b['flags'])) or '-'}')")
-                else:
-                    problemy.append("BRAK DXF (blacha wypalana — 99% archiwum ma DXF)")
-            if not pdf:
-                problemy.append("BRAK PDF")
-        elif kat == "blacha_c":
-            if not pdf:
-                problemy.append("BRAK PDF")
-        elif kat == "przygotowka":
-            if not dxf:
-                problemy.append("BRAK DXF (przygotówka/PL-t)")
-        else:  # material_ciety, inne
-            if not pdf:
-                if kat == "inne" and not b["desc"] and not dxf:
-                    uwagi.append(f"{etykieta}: brak plików, puste DESCRIPTION — wygląda na część kupną "
-                                 f"oznaczoną Normal; sprawdź BOM STRUCTURE")
+            # --- wymagane pliki wg kategorii
+            if kat == "purchased":
+                if not dxf and not pdf:
+                    continue  # norma (93% w archiwum) — bez szumu
+            elif kat == "ramka":
+                if not pdf:
+                    uwagi.append(f"{etykieta}: ramka tabliczki bez PDF — w archiwum 61% ma PDF, 20% nie; do decyzji")
                     continue
-                problemy.append("BRAK PDF")
+            elif kat == "zlozenie":
+                if not pdf:
+                    problemy.append("BRAK PDF złożenia")
+                if dxf:
+                    uwagi.append(f"{etykieta}: złożenie ma DXF — rzadkie (szablony G BOLTON), sprawdź czy celowe")
+            elif kat == "blacha":
+                if not dxf:
+                    if czy_krawedz_plaskownik(b):
+                        uwagi.append(f"{etykieta}: krawędź z paska {b['desc']} bez DXF — typowe dla GRADING "
+                                     f"(płaskownik, cięcie+ukos), ale flaga C w BOM by to potwierdziła (jest: "
+                                     f"'{''.join(sorted(b['flags'])) or '-'}')")
+                    else:
+                        problemy.append("BRAK DXF (blacha wypalana — 99% archiwum ma DXF)")
+                if not pdf:
+                    problemy.append("BRAK PDF")
+            elif kat == "blacha_c":
+                if not pdf:
+                    problemy.append("BRAK PDF")
+            elif kat == "przygotowka":
+                if not dxf:
+                    problemy.append("BRAK DXF (przygotówka/PL-t)")
+            else:  # material_ciety, inne
+                if not pdf:
+                    if kat == "inne" and not b["desc"] and not dxf:
+                        uwagi.append(f"{etykieta}: brak plików, puste DESCRIPTION — wygląda na część kupną "
+                                     f"oznaczoną Normal; sprawdź BOM STRUCTURE")
+                        continue
+                    problemy.append("BRAK PDF")
 
-        # --- nazwa pliku vs BOM
-        for info in (dxf, pdf):
-            if not info:
-                continue
-            e = info["ext"]
-            if info["asm"]:
+            # --- nazwa pliku vs BOM
+            for info in (dxf, pdf):
+                if not info:
+                    continue
+                e = info["ext"]
+                if info["asm"]:
+                    if info["flags"] != b["flags"]:
+                        problemy.append(f"{e}: flagi '{''.join(sorted(info['flags'])) or '-'}' vs BOM "
+                                        f"'{''.join(sorted(b['flags'])) or '-'}'")
+                    continue
+                if info["thk"] is not None and b["dims"]:
+                    if info["thk"] not in b["dims"]:
+                        problemy.append(f"{e}: grubość {info['thk']:g} nie występuje w wymiarach BOM ({b['desc']})")
+                if kat == "blacha" and info["thk"] is None:
+                    problemy.append(f"{e}: brak grubości w nazwie ({b['desc']})")
+                if info["mat"] and not mat_zgodny(info["mat"], b["mat"]):
+                    problemy.append(f"{e}: materiał '{info['mat']}' vs BOM '{b['mat']}'")
+                if info["qty"] is not None and b["qty"] is not None:
+                    if info["qty"] not in (b["qty"], b["qty_total"]):
+                        problemy.append(f"{e}: ilość {info['qty']} vs BOM {b['qty']}"
+                                        + (f" (całk. {b['qty_total']:g})" if b["qty_total"] != b["qty"] else ""))
                 if info["flags"] != b["flags"]:
                     problemy.append(f"{e}: flagi '{''.join(sorted(info['flags'])) or '-'}' vs BOM "
                                     f"'{''.join(sorted(b['flags'])) or '-'}'")
-                continue
-            if info["thk"] is not None and b["dims"]:
-                if info["thk"] not in b["dims"]:
-                    problemy.append(f"{e}: grubość {info['thk']:g} nie występuje w wymiarach BOM ({b['desc']})")
-            if kat == "blacha" and info["thk"] is None:
-                problemy.append(f"{e}: brak grubości w nazwie ({b['desc']})")
-            if info["mat"] and not mat_zgodny(info["mat"], b["mat"]):
-                problemy.append(f"{e}: materiał '{info['mat']}' vs BOM '{b['mat']}'")
-            if info["qty"] is not None and b["qty"] is not None:
-                if info["qty"] not in (b["qty"], b["qty_total"]):
-                    problemy.append(f"{e}: ilość {info['qty']} vs BOM {b['qty']}"
-                                    + (f" (całk. {b['qty_total']:g})" if b["qty_total"] != b["qty"] else ""))
-            if info["flags"] != b["flags"]:
-                problemy.append(f"{e}: flagi '{''.join(sorted(info['flags'])) or '-'}' vs BOM "
-                                f"'{''.join(sorted(b['flags'])) or '-'}'")
 
-        # --- prefiksy
-        if dxf and not dxf["prefiks"]:
-            uwagi.append(f"{etykieta}: DXF bez prefiksu złożenia w nazwie")
-        if pdf and pdf["prefiks"] and not pdf["asm"]:
-            uwagi.append(f"{etykieta}: PDF z prefiksem złożenia (wg wzorca PDF-y części są bez)")
+            # --- prefiksy
+            if dxf and not dxf["prefiks"]:
+                uwagi.append(f"{etykieta}: DXF bez prefiksu złożenia w nazwie")
+            if pdf and pdf["prefiks"] and not pdf["asm"]:
+                uwagi.append(f"{etykieta}: PDF z prefiksem złożenia (wg wzorca PDF-y części są bez)")
 
-        # --- zawartosc PDF
-        tresc = None
-        if pdf:
-            tresc = czytaj_pdf(os.path.join(folder, pdf["file"]))
-            if "stamp" not in tresc:
-                bez_stempla.append(etykieta)
-            elif b["qty"] is not None and tresc["stamp"] not in (b["qty"], b["qty_total"]):
-                if tresc.get("lustro"):
-                    uwagi.append(f"{etykieta}: stempel 'Ilość: {tresc['stamp']}' vs BOM {b['qty']}, ale jest "
-                                 f"adnotacja o odbiciu lustrzanym — prawdopodobnie celowe")
-                else:
-                    problemy.append(f"stempel 'Ilość: {tresc['stamp']}' vs BOM {b['qty']}")
-            if kat in ("blacha", "blacha_c") and "dims" in tresc and b["dims"]:
-                if tresc["dims"] != sorted(b["dims"]):
-                    problemy.append(f"tabliczka PDF: wymiary {tresc['dims']} vs BOM {sorted(b['dims'])}")
-            if kat in ("blacha", "blacha_c") and "mat" in tresc and not mat_zgodny(tresc["mat"], b["mat"]):
-                problemy.append(f"tabliczka PDF: materiał '{tresc['mat']}' vs BOM '{b['mat']}'")
+            # --- zawartosc PDF
+            tresc = None
+            if pdf:
+                tresc = czytaj_pdf(os.path.join(folder, pdf["file"]))
+                if "stamp" not in tresc:
+                    bez_stempla.append(etykieta)
+                elif b["qty"] is not None and tresc["stamp"] not in (b["qty"], b["qty_total"]):
+                    if tresc.get("lustro"):
+                        uwagi.append(f"{etykieta}: stempel 'Ilość: {tresc['stamp']}' vs BOM {b['qty']}, ale jest "
+                                     f"adnotacja o odbiciu lustrzanym — prawdopodobnie celowe")
+                    else:
+                        problemy.append(f"stempel 'Ilość: {tresc['stamp']}' vs BOM {b['qty']}")
+                if kat in ("blacha", "blacha_c") and "dims" in tresc and b["dims"]:
+                    if tresc["dims"] != sorted(b["dims"]):
+                        problemy.append(f"tabliczka PDF: wymiary {tresc['dims']} vs BOM {sorted(b['dims'])}")
+                if kat in ("blacha", "blacha_c") and "mat" in tresc and not mat_zgodny(tresc["mat"], b["mat"]):
+                    problemy.append(f"tabliczka PDF: materiał '{tresc['mat']}' vs BOM '{b['mat']}'")
 
-        # --- geometria DXF vs DESCRIPTION (tylko wersja GEO)
-        if GEO and dxf and not dxf["asm"] and len(b["dims"]) == 3:
-            bb = None
-            try:
-                bb = dxf_gabaryt(os.path.join(folder, dxf["file"]))
-            except Exception as e:
-                uwagi.append(f"{etykieta}: nie udało się odczytać geometrii DXF ({type(e).__name__})")
-            if bb:
-                dev, plan, bbs = geo_porownaj(b, dxf, bb)
-                opis_geo = (f"geometria DXF {bbs[0]:.0f}x{bbs[1]:.0f} vs BOM {plan[0]:g}x{plan[1]:g} "
-                            f"(odchyłka {dev:.1f} mm)")
-                gieta = "p" in b["flags"]
-                obrabiana = "o" in b["flags"] or "u" in b["flags"]
-                if max(plan) > 0 and max(bbs) > 1.5 * max(plan):
-                    uwagi.append(f"{etykieta}: DXF zawiera więcej niż kontur części "
-                                 f"(ramka/arkusz? {opis_geo})")
-                elif gieta:
-                    if dev > GEO_TOL_BLAD:
-                        uwagi.append(f"{etykieta}: {opis_geo} — część gięta/walcowana; jeśli DESCRIPTION "
-                                     f"to wymiar po gięciu, różnica jest naturalna")
-                elif obrabiana:
-                    if dev > GEO_TOL_BLAD:
-                        uwagi.append(f"{etykieta}: {opis_geo} — część z obróbką/ukosem (możliwy naddatek); "
-                                     f"zweryfikuj")
-                else:
-                    if dev > GEO_TOL_BLAD:
-                        problemy.append(opis_geo)
-                    elif dev > GEO_TOL_INFO:
-                        uwagi.append(f"{etykieta}: {opis_geo} — strefa szara")
-
-        # --- gabaryt DXF vs tabliczka PDF, gdy BOM nie ma 3 wymiarów (np. "PL 10" przygotówki)
-        if GEO and dxf and not dxf["asm"] and len(b["dims"]) != 3 and tresc and "dims" in tresc:
-            try:
-                bb = dxf_gabaryt(os.path.join(folder, dxf["file"]))
-            except Exception:
+            # --- geometria DXF vs DESCRIPTION (tylko wersja GEO)
+            if GEO and dxf and not dxf["asm"] and len(b["dims"]) == 3:
                 bb = None
-            if bb:
-                dev, plan, bbs = geo_porownaj(dict(b, dims=tresc["dims"]), dxf, bb)
-                opis_geo = (f"geometria DXF {bbs[0]:.0f}x{bbs[1]:.0f} vs rysunek PDF {plan[0]:g}x{plan[1]:g} "
-                            f"(odchyłka {dev:.1f} mm)")
-                if dev > GEO_TOL_BLAD and not ("p" in b["flags"] or "o" in b["flags"] or "u" in b["flags"]):
-                    problemy.append(opis_geo)
-                elif dev > GEO_TOL_INFO:
-                    uwagi.append(f"{etykieta}: {opis_geo} — strefa szara / część gięta lub obrabiana")
-
-        # --- nakładka DXF na widok z rysunku PDF (1:1)
-        nak_ok = False
-        if GEO and dxf and pdf and not dxf["asm"]:
-            nak = None
-            try:
-                nak = nakladka(os.path.join(folder, dxf["file"]), os.path.join(folder, pdf["file"]))
-            except Exception as e:
-                uwagi.append(f"{etykieta}: nie udało się nałożyć DXF na rysunek ({type(e).__name__}: {e})")
-            if nak:
-                bl_n, uw_n = ocen_nakladke(b, nak)
-                problemy.extend(bl_n)
-                uwagi.extend(f"{etykieta}: {u}" for u in uw_n)
-                nak_ok = nak["p95"] <= NAKLADKA_ZLY   # widok znaleziony: narożniki sprawdzone geometrycznie
-                if bl_n or uw_n:
-                    NAKLADKI_PDF.append((f"{os.path.basename(folder)} [{b['pos']}] {b['part']}",
-                                         os.path.join(folder, pdf["file"]), nak["strona"], nak["Q"], nak["r"]))
-            else:
-                bez_widoku.append(etykieta)
-
-        # --- kontur DXF tak, jak zobaczy go wypalarka + fazy/otwory vs rysunek PDF
-        if GEO and dxf and not dxf["asm"]:
-            ana = None
-            try:
-                ana = dxf_analiza(os.path.join(folder, dxf["file"]))
-            except Exception as e:
-                uwagi.append(f"{etykieta}: nie udało się przeanalizować konturu DXF ({type(e).__name__})")
-            if ana:
-                bl_k, uw_k = ocen_kontur(b, kat, ana, tresc, nak_ok)
-                problemy.extend(bl_k)
-                uwagi.extend(f"{etykieta}: {u}" for u in uw_k)
-
-        # --- geometria STP (bryła 3D) vs DESCRIPTION — niezależne od DXF, tylko jeśli mamy mapę.
-        # Tylko INFORMACYJNIE (poziom "INFO STP", nie liczy się do błędów): gabaryt bryły z STP
-        # zależy od ułożenia części w złożeniu (obrót, pochylenie, gięcie), więc różnica przy
-        # zgodnym DXF/PDF nie oznacza błędu dokumentacji (GE98022-S2, 2026-09-30).
-        if stp_mapa and not (dxf and dxf.get("asm")) and len(b["dims"]) == 3:
-            dims3 = stp_mapa.get(b["part"].upper())
-            if dims3:
-                wynik = geo_porownaj_3d(b["dims"], dims3)
-                if wynik:
-                    dev, plan, znaleziony = wynik
-                    opis_geo = (f".STP: bryła {znaleziony[0]:.0f}x{znaleziony[1]:.0f}x{znaleziony[2]:.0f} "
-                                f"vs BOM {plan[0]:g}x{plan[1]:g}x{plan[2]:g} (odchyłka {dev:.1f} mm)")
+                try:
+                    bb = dxf_gabaryt(os.path.join(folder, dxf["file"]))
+                except Exception as e:
+                    uwagi.append(f"{etykieta}: nie udało się odczytać geometrii DXF ({type(e).__name__})")
+                if bb:
+                    dev, plan, bbs = geo_porownaj(b, dxf, bb)
+                    opis_geo = (f"geometria DXF {bbs[0]:.0f}x{bbs[1]:.0f} vs BOM {plan[0]:g}x{plan[1]:g} "
+                                f"(odchyłka {dev:.1f} mm)")
                     gieta = "p" in b["flags"]
                     obrabiana = "o" in b["flags"] or "u" in b["flags"]
-                    if dev > GEO_TOL_BLAD:
-                        if gieta:
-                            powod = "część gięta — bryła w STP jest już po gięciu"
-                        elif obrabiana:
-                            powod = "część z obróbką — możliwy naddatek"
-                        else:
-                            powod = "najczęściej część obrócona/pochylona w złożeniu"
-                        stp_info.append(f"{etykieta}: {opis_geo} — {powod}")
-            elif b["part"].upper() != proj_root and "m" not in b["flags"] and kat not in ("purchased", "ramka"):
-                stp_info.append(f"{etykieta}: .STP: część nie znaleziona w bryle zespołu STP po nazwie "
-                                f"(inna nazwa w modelu albo część spoza tego pliku STP)")
+                    if max(plan) > 0 and max(bbs) > 1.5 * max(plan):
+                        uwagi.append(f"{etykieta}: DXF zawiera więcej niż kontur części "
+                                     f"(ramka/arkusz? {opis_geo})")
+                    elif gieta:
+                        if dev > GEO_TOL_BLAD:
+                            uwagi.append(f"{etykieta}: {opis_geo} — część gięta/walcowana; jeśli DESCRIPTION "
+                                         f"to wymiar po gięciu, różnica jest naturalna")
+                    elif obrabiana:
+                        if dev > GEO_TOL_BLAD:
+                            uwagi.append(f"{etykieta}: {opis_geo} — część z obróbką/ukosem (możliwy naddatek); "
+                                         f"zweryfikuj")
+                    else:
+                        if dev > GEO_TOL_BLAD:
+                            problemy.append(opis_geo)
+                        elif dev > GEO_TOL_INFO:
+                            uwagi.append(f"{etykieta}: {opis_geo} — strefa szara")
+
+            # --- gabaryt DXF vs tabliczka PDF, gdy BOM nie ma 3 wymiarów (np. "PL 10" przygotówki)
+            if GEO and dxf and not dxf["asm"] and len(b["dims"]) != 3 and tresc and "dims" in tresc:
+                try:
+                    bb = dxf_gabaryt(os.path.join(folder, dxf["file"]))
+                except Exception:
+                    bb = None
+                if bb:
+                    dev, plan, bbs = geo_porownaj(dict(b, dims=tresc["dims"]), dxf, bb)
+                    opis_geo = (f"geometria DXF {bbs[0]:.0f}x{bbs[1]:.0f} vs rysunek PDF {plan[0]:g}x{plan[1]:g} "
+                                f"(odchyłka {dev:.1f} mm)")
+                    if dev > GEO_TOL_BLAD and not ("p" in b["flags"] or "o" in b["flags"] or "u" in b["flags"]):
+                        problemy.append(opis_geo)
+                    elif dev > GEO_TOL_INFO:
+                        uwagi.append(f"{etykieta}: {opis_geo} — strefa szara / część gięta lub obrabiana")
+
+            # --- nakładka DXF na widok z rysunku PDF (1:1)
+            nak_stan = None
+            if weryf is not None and GEO and pdf:
+                nak = None
+                try:
+                    nak = nakladka(os.path.join(folder, dxf["file"]), os.path.join(folder, pdf["file"]))
+                except Exception as e:
+                    weryf["powod"] = f"błąd programu przy nakładce ({type(e).__name__}: {e})"
+                if nak:
+                    bl_n, uw_n, potwierdzony = ocen_nakladke(b, nak)
+                    problemy.extend(bl_n)
+                    uwagi.extend(f"{etykieta}: {u}" for u in uw_n)
+                    if nak["mediana"] <= NAKLADKA_ZLY * nak["tol"]:
+                        nak_stan = "potwierdzony" if potwierdzony else "znaleziony"
+                    weryf.update(nakladka=nak, potwierdzony=potwierdzony and not nak["lustro"])
+                    if nak["lustro"]:
+                        weryf["powod"] = "pasuje do rysunku tylko po odbiciu lustrzanym — sprawdź stronę gięcia/ukosu"
+                    elif uw_n and not potwierdzony:
+                        weryf["powod"] = "; ".join(u.split(" — ", 1)[-1] for u in uw_n)
+                    if bl_n or uw_n or PODGLAD_WSZYSTKIE:
+                        NAKLADKI_PDF.append((f"{os.path.basename(folder)} [{b['pos']}] {b['part']}",
+                                             os.path.join(folder, pdf["file"]), nak["strona"], nak["Q"], nak["r"],
+                                             nak["tol"]))
+                elif not weryf["powod"]:
+                    weryf["powod"] = ("na rysunku nie znaleziono widoku pasującego do DXF (brak widoku płaskiego/"
+                                      "rozwinięcia, rysunek skanowany albo DXF zupełnie inny niż rysunek)")
+            elif weryf is not None and GEO:
+                weryf["powod"] = "brak PDF rysunku — nie ma z czym porównać DXF"
+
+            # --- kontur DXF tak, jak zobaczy go wypalarka + fazy/otwory vs rysunek PDF
+            if GEO and dxf and not dxf["asm"]:
+                ana = None
+                try:
+                    ana = dxf_analiza(os.path.join(folder, dxf["file"]))
+                except Exception as e:
+                    problemy.append(f".DXF: kontur — nie udało się odczytać DXF ({type(e).__name__}: {e}) — plik "
+                                    f"uszkodzony albo w nieobsługiwanym formacie")
+                if ana:
+                    bl_k, uw_k = ocen_kontur(b, kat, ana, tresc, nak_stan, weryf.get("nakladka"))
+                    problemy.extend(bl_k)
+                    uwagi.extend(f"{etykieta}: {u}" for u in uw_k)
+                    weryf["kontur_ok"] = not bl_k
+
+            # --- geometria STP (bryła 3D) vs DESCRIPTION — niezależne od DXF, tylko jeśli mamy mapę.
+            # Tylko INFORMACYJNIE (poziom "INFO STP", nie liczy się do błędów): gabaryt bryły z STP
+            # zależy od ułożenia części w złożeniu (obrót, pochylenie, gięcie), więc różnica przy
+            # zgodnym DXF/PDF nie oznacza błędu dokumentacji (GE98022-S2, 2026-09-30).
+            if stp_mapa and not (dxf and dxf.get("asm")) and len(b["dims"]) == 3:
+                dims3 = stp_mapa.get(b["part"].upper())
+                if dims3:
+                    wynik = geo_porownaj_3d(b["dims"], dims3)
+                    if wynik:
+                        dev, plan, znaleziony = wynik
+                        opis_geo = (f".STP: bryła {znaleziony[0]:.0f}x{znaleziony[1]:.0f}x{znaleziony[2]:.0f} "
+                                    f"vs BOM {plan[0]:g}x{plan[1]:g}x{plan[2]:g} (odchyłka {dev:.1f} mm)")
+                        gieta = "p" in b["flags"]
+                        obrabiana = "o" in b["flags"] or "u" in b["flags"]
+                        if dev > GEO_TOL_BLAD:
+                            if gieta:
+                                powod = "część gięta — bryła w STP jest już po gięciu"
+                            elif obrabiana:
+                                powod = "część z obróbką — możliwy naddatek"
+                            else:
+                                powod = "najczęściej część obrócona/pochylona w złożeniu"
+                            stp_info.append(f"{etykieta}: {opis_geo} — {powod}")
+                elif b["part"].upper() != proj_root and "m" not in b["flags"] and kat not in ("purchased", "ramka"):
+                    stp_info.append(f"{etykieta}: .STP: część nie znaleziona w bryle zespołu STP po nazwie "
+                                    f"(inna nazwa w modelu albo część spoza tego pliku STP)")
+        except Exception as e:
+            problemy.append(f"BŁĄD PROGRAMU przy sprawdzaniu tej pozycji ({type(e).__name__}: {e}) — pozycja nie "
+                            f"została sprawdzona do końca, sprawdź ją ręcznie")
+            if weryf is not None:
+                weryf["potwierdzony"] = False
+                weryf["powod"] = f"błąd programu ({type(e).__name__}: {e})"
+
+        if weryf is not None:
+            geo_bl = [x for x in problemy if x.startswith(".DXF:") or x.startswith("geometria DXF")
+                      or x.startswith("BŁĄD PROGRAMU")]
+            if geo_bl and not all(x.startswith("BŁĄD PROGRAMU") for x in geo_bl):
+                weryf["status"] = "RÓŻNICE"
+                weryf["powod"] = "; ".join(x.replace(".DXF: ", "") for x in geo_bl)
+            elif weryf["potwierdzony"] and weryf["kontur_ok"] and AUTOTEST["ok"]:
+                weryf["status"] = "ZGODNY 1:1"
+            else:
+                weryf["status"] = "NIEZWERYFIKOWANY"
+                if not weryf["powod"]:
+                    weryf["powod"] = "nie udało się potwierdzić konturu (szczegóły w zakładce Błędy i uwagi)"
+            WERYFIKACJA_DXF.append(weryf)
+            weryfikacje.append(weryf)
 
         # --- zgodność DXF tej pozycji (do podsumowania na końcu raportu)
         if dxf and not dxf["asm"]:
@@ -1671,11 +2196,6 @@ def sprawdz(folder):
         else:
             for e in bez_stempla:
                 uwagi.append(f"{e}: PDF bez stempla 'Ilość:' (nie przeszedł przez PdfRenamer?)")
-
-    if bez_widoku:
-        uwagi.append(f".DXF: nakładka — {len(bez_widoku)} części bez widoku o wymiarach DXF na rysunku (brak "
-                     f"widoku płaskiego/rozwinięcia albo nietypowa skala) — porównanie 1:1 pominięte, np. "
-                     f"{', '.join(bez_widoku[:3])}")
 
     for key, f in pliki.items():
         if key == proj_root or key in bom_asm:
@@ -1701,8 +2221,18 @@ def sprawdz(folder):
             print("    i", x)
     if dxf_sprawdzone and not dxf_bledne:
         print(f"  >>> WSZYSTKIE PLIKI DXF ZGODNE Z BOM ({dxf_sprawdzone}) <<<")
-    if not bledy:
+    zgodne_1do1 = [w for w in weryfikacje if w["status"] == "ZGODNY 1:1"]
+    niezweryf = [w for w in weryfikacje if w["status"] == "NIEZWERYFIKOWANY"]
+    if weryfikacje:
+        maks = max((w["nakladka"]["r"].max() for w in zgodne_1do1), default=0)
+        print(f"  >>> DXF POTWIERDZONE 1:1 Z RYSUNKIEM: {len(zgodne_1do1)}/{len(weryfikacje)}"
+              + (f" (maks. odchyłka {maks:.2f} mm)" if zgodne_1do1 else "") + " <<<")
+        for w in niezweryf:
+            print(f"    ?? [{w['pos']}] {w['part']}: NIEZWERYFIKOWANY — {w['powod']}")
+    if not bledy and not niezweryf:
         print("  >>> FOLDER ZGODNY Z WZORCEM <<<")
+    elif not bledy:
+        print(f"  >>> BRAK BŁĘDÓW, ALE {len(niezweryf)} DXF NIEZWERYFIKOWANYCH — SPRAWDŹ JE RĘCZNIE <<<")
 
     dodaj_wiersze(folder, bledy, "BŁĄD")
     dodaj_wiersze(folder, uwagi, "UWAGA")
@@ -1713,8 +2243,11 @@ def sprawdz(folder):
         stp="TAK" if stp_mapa else ("BŁĄD" if stp_blad else "brak pliku"),
         stp_info=len(stp_info),
         dxf_sprawdzone=dxf_sprawdzone, dxf_bledne=dxf_bledne, dxf_uwagi=dxf_uwagi,
+        dxf_1do1=len(zgodne_1do1), dxf_wszystkie=len(weryfikacje),
+        dxf_niezweryf=[(w["part"], w["powod"]) for w in niezweryf],
+        dxf_rozne=[w["part"] for w in weryfikacje if w["status"] == "RÓŻNICE"],
     ))
-    return 1 if bledy else 0
+    return 1 if bledy or (niezweryf and NIEZWERYFIKOWANE_BLOKUJA) else 0
 
 
 # ---------------------------------------------------------------- raport xlsx
@@ -1733,6 +2266,7 @@ def zapisz_raport_xlsx(sciezka):
     ws.freeze_panes = "A2"
 
     czerwony = PatternFill("solid", fgColor="F8CBCB")
+    pomaranczowy = PatternFill("solid", fgColor="F8CBAD")
     zolty = PatternFill("solid", fgColor="FFF3B0")
     niebieski = PatternFill("solid", fgColor="DDEBF7")
     zielony = PatternFill("solid", fgColor="C6EFCE")
@@ -1772,6 +2306,9 @@ def zapisz_raport_xlsx(sciezka):
         ws.row_dimensions[r].height = 30
 
     for p in PODSUMOWANIE_FOLDEROW:
+        if p.get("niesprawdzony"):
+            wiersz_podsumowania(p["folder"], "Wynik", f"FOLDER NIE ZOSTAŁ SPRAWDZONY: {p['niesprawdzony']}", czerwony)
+            continue
         n, zle, uw = p["dxf_sprawdzone"], p["dxf_bledne"], p["dxf_uwagi"]
         if zle:
             wiersz_podsumowania(p["folder"], "DXF", f"DXF NIEZGODNE Z BOM: {len(zle)} poz. "
@@ -1793,15 +2330,60 @@ def zapisz_raport_xlsx(sciezka):
         elif p["stp"] == "TAK":
             wiersz_podsumowania(p["folder"], "Model .stp", "Model 3D (.stp) zgodny z BOM.", zielony)
 
+        if p["dxf_wszystkie"]:
+            if p["dxf_rozne"]:
+                wiersz_podsumowania(p["folder"], "DXF 1:1", f"DXF RÓŻNE OD RYSUNKU: {len(p['dxf_rozne'])} szt. "
+                                    f"({', '.join(p['dxf_rozne'])}) — szczegóły w zakładce Weryfikacja DXF 1 do 1 i w "
+                                    f"podglądzie NAKLADKI_*.pdf.", czerwony)
+            if p["dxf_niezweryf"]:
+                wiersz_podsumowania(p["folder"], "DXF 1:1", f"{len(p['dxf_niezweryf'])} z {p['dxf_wszystkie']} DXF "
+                                    f"NIEZWERYFIKOWANYCH — sprawdź je ręcznie: "
+                                    + "; ".join(f"{c} ({pw})" for c, pw in p["dxf_niezweryf"][:5])
+                                    + (" …" if len(p["dxf_niezweryf"]) > 5 else ""), pomaranczowy)
+            if not p["dxf_rozne"] and not p["dxf_niezweryf"]:
+                wiersz_podsumowania(p["folder"], "DXF 1:1", f"Wszystkie {p['dxf_wszystkie']} DXF potwierdzone 1:1 z "
+                                    f"rysunkami (nakładka konturu na widok + czysty kontur).", zielony)
+
         if p["bledy"]:
             wiersz_podsumowania(p["folder"], "Wynik", f"Błędów w dokumentacji: {p['bledy']} — czerwone wiersze wyżej.",
                                 czerwony)
+        elif p["dxf_niezweryf"]:
+            wiersz_podsumowania(p["folder"], "Wynik", f"Brak błędów, ale {len(p['dxf_niezweryf'])} DXF "
+                                f"NIEZWERYFIKOWANYCH — dokumentacja NIE jest w pełni potwierdzona, sprawdź je ręcznie.",
+                                pomaranczowy)
         else:
             wiersz_podsumowania(p["folder"], "Wynik", "Dokumentacja zgodna z BOM — brak błędów."
+                                + (" Wszystkie DXF potwierdzone 1:1 z rysunkami." if p["dxf_wszystkie"] else "")
                                 + (f" Uwagi ({p['uwagi']}) są do przejrzenia." if p["uwagi"] else ""), zielony)
 
+    # --- zakładka: każdy DXF z dowodem weryfikacji 1:1
+    ws3 = wb.create_sheet("Weryfikacja DXF 1 do 1")   # w nazwie arkusza nie wolno ":"
+    ws3.append(["Folder", "POS", "Część", "Tytuł", "Plik DXF", "Status", "Maks. odchyłka [mm]",
+                "Tolerancja [mm]", "Widok na rysunku", "Orientacja DXF", "Powód / szczegóły"])
+    for c in ws3[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="404040")
+    ws3.freeze_panes = "A2"
+    kolor_statusu = {"ZGODNY 1:1": zielony, "RÓŻNICE": czerwony, "NIEZWERYFIKOWANY": pomaranczowy}
+    for w in sorted(WERYFIKACJA_DXF, key=lambda w: (w["folder"], pos_key(w["pos"]))):
+        n = w.get("nakladka")
+        ws3.append([w["folder"], w["pos"], w["part"], w["tytul"], w["plik"], w["status"],
+                    round(float(n["r"].max()), 2) if n else None, round(n["tol"], 2) if n else None,
+                    (f"strona {n['strona'] + 1}, 1:{_mm(n['skala'])}" + ("" if n["skala_opisana"] else " (dobrana)")
+                     + (", szukany na całej stronie" if n.get("zrodlo") == "strona" else "")) if n else "",
+                    (f"obrót {n['obrot']:g}°" + (", LUSTRO" if n["lustro"] else "")) if n else "",
+                    w["powod"]])
+        for c in ws3[ws3.max_row]:
+            c.alignment = Alignment(vertical="top", wrap_text=(c.column_letter in "EK"))
+        ws3[ws3.max_row][5].fill = kolor_statusu.get(w["status"], szary)
+    for i, sz in enumerate([22, 8, 14, 22, 40, 18, 12, 11, 24, 16, 70], start=1):
+        ws3.column_dimensions[openpyxl.utils.get_column_letter(i)].width = sz
+    if ws3.max_row > 1:
+        ws3.auto_filter.ref = f"A1:K{ws3.max_row}"
+
     ws2 = wb.create_sheet("Podsumowanie folderów")
-    ws2.append(["Folder", "Pozycji BOM", "Zgodnych", "Błędów", "Uwag", "DXF", "Plik STP", "Info STP"])
+    ws2.append(["Folder", "Pozycji BOM", "Zgodnych", "Błędów", "Uwag", "DXF", "Plik STP", "Info STP",
+                "DXF 1:1", "Niezweryf."])
     for c in ws2[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="404040")
@@ -1812,7 +2394,8 @@ def zapisz_raport_xlsx(sciezka):
             dxf_stan = f"ZGODNE ({p['dxf_sprawdzone']})"
         else:
             dxf_stan = "brak"
-        ws2.append([p["folder"], p["pozycji"], p["ok"], p["bledy"], p["uwagi"], dxf_stan, p["stp"], p["stp_info"]])
+        ws2.append([p["folder"], p["pozycji"], p["ok"], p["bledy"], p["uwagi"], dxf_stan, p["stp"], p["stp_info"],
+                    f"{p['dxf_1do1']}/{p['dxf_wszystkie']}", len(p["dxf_niezweryf"])])
         if p["bledy"] > 0:
             for c in ws2[ws2.max_row]:
                 c.fill = czerwony
@@ -1820,10 +2403,15 @@ def zapisz_raport_xlsx(sciezka):
             ws2[ws2.max_row][5].fill = zielony if p["dxf_sprawdzone"] else szary
         if p["stp_info"]:
             ws2[ws2.max_row][7].fill = niebieski
-    for i, sz in enumerate([28, 12, 10, 8, 8, 14, 10, 9], start=1):
+        if p["dxf_wszystkie"]:
+            ws2[ws2.max_row][8].fill = (czerwony if p["dxf_rozne"] else pomaranczowy if p["dxf_niezweryf"]
+                                        else zielony)
+            if p["dxf_niezweryf"]:
+                ws2[ws2.max_row][9].fill = pomaranczowy
+    for i, sz in enumerate([28, 12, 10, 8, 8, 14, 10, 9, 9, 10], start=1):
         ws2.column_dimensions[openpyxl.utils.get_column_letter(i)].width = sz
     if ws2.max_row > 1:
-        ws2.auto_filter.ref = f"A1:H{ws2.max_row}"
+        ws2.auto_filter.ref = f"A1:J{ws2.max_row}"
 
     wb.save(sciezka)
     return sciezka
@@ -1835,11 +2423,30 @@ if __name__ == "__main__":
         sys.exit(0)
     kod = 0
     folder_dla_raportu = None
+    if GEO:
+        AUTOTEST.update(autotest())
+        print(("Autotest geometrii DXF: OK — " if AUTOTEST["ok"] else
+               "\n" + "!" * 92 + "\n!!! AUTOTEST GEOMETRII NIE PRZESZEDŁ — wyniki DXF NIE SĄ WIARYGODNE: ")
+              + AUTOTEST["opis"] + ("" if AUTOTEST["ok"] else "\n" + "!" * 92))
+        if not AUTOTEST["ok"]:
+            kod = 1
+            WSZYSTKIE_WIERSZE.append(dict(folder="(program)", pos="", part="AUTOTEST", tytul="", poziom="BŁĄD",
+                                          plik="", rodzaj="autotest programu",
+                                          opis=f"AUTOTEST geometrii nie przeszedł — żaden DXF nie jest uznany "
+                                               f"za zweryfikowany: {AUTOTEST['opis']}"))
+    else:
+        print("UWAGA: brak biblioteki ezdxf — DXF NIE będą weryfikowane (wszystkie dostaną status NIEZWERYFIKOWANY)")
     for arg in sys.argv[1:]:
         if os.path.isdir(arg):
             if folder_dla_raportu is None:
                 folder_dla_raportu = os.path.dirname(arg.rstrip("\\/")) or arg
-            kod |= sprawdz(arg)
+            try:
+                kod |= sprawdz(arg)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"  BŁĄD PROGRAMU — folder NIE został sprawdzony: {type(e).__name__}: {e}")
+                kod |= folder_niesprawdzony(arg, f"błąd programu {type(e).__name__}: {e}")
         else:
             print("Pominięto (to nie folder):", arg)
 

@@ -59,6 +59,48 @@ CO JESZCZE ŁAPIE W GEOMETRII (od 03.07.2026)
    (UWAGA: w wersji z 30.09.2026 punktów 1 i 2 faktycznie nie było
    w programie - przywrócone 08.10.2026, patrz niżej.)
 
+JAK SPRAWDZIĆ FOLDERY WYDANE W OSTATNICH 2 TYGODNIACH (od 08.10.2026)
+-------------------------------------------------------------------
+Sposób 1 (najprościej): przeciągnij folder NADRZĘDNY z wydaniami
+(np. S:\14_Gotowe_Projekty\GJERSTAD) na plik
+   "Sprawdz ostatnie dni - przeciagnij folder nadrzedny.bat"
+Program sam wybierze podfoldery utworzone/zmienione w ostatnich 14 dniach,
+pokaże ich listę i sprawdzi wszystkie naraz. Inna liczba dni (np. 30):
+w oknie cmd wpisz
+   "Sprawdz ostatnie dni - przeciagnij folder nadrzedny.bat" "S:\14_Gotowe_Projekty\GJERSTAD" 30
+Sposób 2: w Eksploratorze posortuj po "Data modyfikacji", zaznacz foldery
+z ostatnich 2 tygodni i przeciągnij je WSZYSTKIE NARAZ na
+   "Sprawdz hybrydowo GEO - przeciagnij folder.bat"
+W obu przypadkach powstaje JEDEN raport RAPORT_SPRAWDZENIA_<data>.xlsx
+(obok folderów) i podgląd NAKLADKI_<data>.pdf.
+
+ZASADA BEZPIECZEŃSTWA: STATUS KAŻDEGO DXF (od 08.10.2026)
+--------------------------------------------------------
+Każdy DXF części dostaje w zakładce "Weryfikacja DXF 1 do 1" jeden status:
+   ZGODNY 1:1        (zielony)  - program POZYTYWNIE potwierdził: kontur
+                                  DXF leży na liniach rysunku (podana maks.
+                                  odchyłka i tolerancja), kontur czysty.
+   RÓŻNICE           (czerwony) - DXF różni się od rysunku albo ma wadę
+                                  konturu - opis i współrzędne w kolumnie.
+   NIEZWERYFIKOWANY  (pomarańczowy) - program NIE MÓGŁ tego potwierdzić:
+                                  brak PDF, na rysunku nie ma widoku
+                                  rozwinięcia, rysunek skanowany, DXF pasuje
+                                  tylko po odbiciu lustrzanym, błąd programu.
+                                  Powód jest podany - TAKI DXF SPRAWDŹ RĘCZNIE.
+Nic nie przechodzi "po cichu": folder jest "ZGODNY" tylko wtedy, gdy nie ma
+błędów I wszystkie DXF są potwierdzone 1:1. Folder, którego nie dało się
+sprawdzić (brak BOM, brak dostępu, błąd programu), też jest w raporcie
+jako BŁĄD - nigdy nie znika z listy.
+(Kod wyjścia programu dla innych narzędzi: jak dotąd 1 tylko przy błędach;
+ustaw zmienną środowiskową SPRAWDZ_NIEZWERYFIKOWANE_BLAD=1, żeby
+niezweryfikowane DXF też dawały kod 1.)
+
+AUTOTEST: przy każdym uruchomieniu program najpierw sprawdza sam siebie
+na wzorcowej części (dobry DXF musi przejść, DXF bez fazy i z przesuniętym
+otworem musi zostać złapany, przerwa w konturze też). Jeśli autotest nie
+przejdzie (np. inna wersja biblioteki w zbudowanym .exe), program wypisze
+duże ostrzeżenie, a ŻADEN DXF nie dostanie statusu ZGODNY 1:1.
+
 NOWOŚĆ (08.10.2026): NAKŁADKA DXF NA RYSUNEK 1:1
 ------------------------------------------------
 Rysunki PDF z Inventora są WEKTOROWE - linie widoku są zapisane
@@ -68,8 +110,19 @@ w PDF jako prawdziwe odcinki i łuki, nie jako obrazek. Program:
   2. nakłada na niego kontur DXF - próbuje obrotów co 90° i odbicia
      lustrzanego, dosuwa dokładnie (dokładność ~0,1 mm przy 1:10),
   3. mierzy, jak daleko każdy punkt DXF leży od linii rysunku.
+Szukanie widoku działa też, gdy widok jest obrócony o dowolny kąt, strona
+PDF jest obrócona, skala nie jest opisana albo do widoku "przyklejona" jest
+linia przekroju - wtedy program szuka DXF na obrazie całej strony
+(korelacja obrazu), a potem mierzy dokładnie na liniach wektorowych.
+Linie kreskowane (ukryte, osie) i strzałki są pomijane.
+TOLERANCJA: 1 mm przy skali do 1:10; przy mniejszych skalach rośnie razem
+z dokładnością rysunku (Inventor zapisuje widok w PDF z dokładnością
+~0,1 pt na papierze), najwyżej 0,25 pt x skala (1:20 -> 1,8 mm,
+1:40 -> 3,5 mm). Rysunek dokładny dostaje ciaśniejszą tolerancję.
+Mniejsze różnice (np. faza 10 zamiast 11, otwór Ø13 zamiast Ø14)
+łapią porównania z wymiarami na rysunku (Ø, notki faz przy widoku).
 Wynik:
-   DXF odbiega od rysunku o więcej niż 1 mm        -> BŁĄD
+   DXF odbiega od rysunku o więcej niż tolerancja   -> BŁĄD
       (podaje miejsce we współrzędnych DXF i maks. odchyłkę;
        części z obróbką "o"                         -> UWAGA)
    na rysunku jest otwór/wycięcie, którego nie ma
@@ -80,10 +133,10 @@ Wynik:
       (części symetryczne nie dają tej uwagi)
    na rysunku nie ma widoku o wymiarach DXF          -> jedna zbiorcza
       UWAGA na folder (brak widoku płaskiego/rozwinięcia)
-Gdy nakładka znalazła widok, porównanie notek faz (punkt 3 niżej) jest
-pomijane - nakładka sprawdza każdy narożnik dokładniej, a notki typu
-"7,00 X 45° Chamfer" to często fazy KRAWĘDZI pod spaw (przekroje), których
-w konturze DXF nie ma.
+Gdy nakładka znalazła widok, notki faz (punkt 3 niżej) są porównywane
+tylko te, które stoją PRZY widoku rozwinięcia (do ~2 cm na papierze) -
+notki przy przekrojach, np. "7,00 X 45° Chamfer", to fazy KRAWĘDZI pod
+spaw, których w konturze DXF nie ma (wzorzec: PG4136348).
 
 PODGLĄD: obok raportu .xlsx powstaje "NAKLADKI_<data>.pdf" - dla każdej
 części z różnicą strona rysunku z naniesionym konturem DXF: zielone
@@ -100,9 +153,10 @@ go wypalarka, i porównuje go z rysunkiem PDF:
    albo linia urwana / wystająca za narożnik            -> BŁĄD
 2. ROZGAŁĘZIENIA - linia kończy się na środku innej linii albo 3+
    linie schodzą się w jednym punkcie. Typowo: faza dorysowana bez
-   przycięcia starego narożnika, albo linia fazy/ukosu krawędzi
-   wyeksportowana z widoku (laser by ją wyciął)          -> BŁĄD
-   (części z ukosowaniem "u" i gięte "p"                 -> UWAGA)
+   przycięcia starego narożnika, albo linia fazy/ukosu/gięcia krawędzi
+   wyeksportowana na warstwę cięcia (laser by ją wyciął)  -> BŁĄD
+   (także przy ukosowaniu "u" i gięciu "p": wzorcowy DXF takiej
+   części ma sam obrys, linie gięcia na warstwie IV_BEND)
 3. FAZY NAROŻNIKÓW vs NOTKI NA RYSUNKU - program szuka na PDF notek
    typu "10 x 45°", "4x 10 x 45°", "FAZA 5x5" i fazy w DXF:
       faza z rysunku, której nie ma w DXF / ma inny wymiar -> BŁĄD
@@ -116,6 +170,7 @@ go wypalarka, i porównuje go z rysunkiem PDF:
    0,15 mm; otwór pod gwint też się liczy, np. M12 -> Ø10,2):
       otwór dorysowany na warstwie 0 bez Ø                 -> BŁĄD
       otwór z eksportu bez Ø (gdy rysunek ma wymiary Ø)    -> BŁĄD
+      (dokładność 0,15 mm - dokładniej niż nakładka)
    Dwa współśrodkowe okręgi (faza/pogłębienie otworu wyeksportowane
    do DXF - laser wytnie większy)                          -> BŁĄD
 5. GABARYT DXF vs TABLICZKA PDF - gdy BOM nie ma wymiarów (np. "PL 10"),
