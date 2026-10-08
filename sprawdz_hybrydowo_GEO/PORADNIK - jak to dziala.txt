@@ -72,7 +72,13 @@ Sposób 2: w Eksploratorze posortuj po "Data modyfikacji", zaznacz foldery
 z ostatnich 2 tygodni i przeciągnij je WSZYSTKIE NARAZ na
    "Sprawdz hybrydowo GEO - przeciagnij folder.bat"
 W obu przypadkach powstaje JEDEN raport RAPORT_SPRAWDZENIA_<data>.xlsx
-(obok folderów) i podgląd NAKLADKI_<data>.pdf.
+(obok folderów), podgląd NAKLADKI_<data>.pdf i LOG_SPRAWDZENIA_<data>.txt
+(wszystko, co program wypisał w czarnym oknie - przy problemach wyślij go).
+Na samym początku program wypisuje swoją wersję ("v5 ...") - jeśli jej nie
+ma, uruchamia się stary .exe (przebuduj: zbuduj_exe.bat).
+UWAGA: pojedynczy folder wydania (np. GE21755-S1) przeciągaj na
+"Sprawdz hybrydowo GEO - przeciagnij folder.bat" (choć "ostatnie dni" też
+go teraz rozpozna po pliku BOM i sprawdzi). Nie uruchamiaj .bat dwuklikiem.
 
 ZASADA BEZPIECZEŃSTWA: STATUS KAŻDEGO DXF (od 08.10.2026)
 --------------------------------------------------------

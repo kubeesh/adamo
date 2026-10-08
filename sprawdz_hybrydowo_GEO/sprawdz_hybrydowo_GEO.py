@@ -2419,12 +2419,43 @@ def zapisz_raport_xlsx(sciezka):
     return sciezka
 
 
+WERSJA = "v5 (2026-10-08: nakładka DXF 1:1, statusy weryfikacji, autotest)"
+
+
+class _Dziennik:
+    """Wszystko, co program wypisuje w konsoli, trafia też do pliku LOG_SPRAWDZENIA_<data>.txt obok raportu
+    — gdy coś pójdzie nie tak, wystarczy przysłać ten plik."""
+
+    def __init__(self, strumien, sciezka):
+        self.strumien, self.plik = strumien, None
+        try:
+            self.plik = open(sciezka, "w", encoding="utf-8")
+        except OSError:
+            pass
+
+    def write(self, t):
+        self.strumien.write(t)
+        if self.plik:
+            self.plik.write(t)
+            self.plik.flush()
+        return len(t)
+
+    def flush(self):
+        self.strumien.flush()
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(0)
     kod = 0
     folder_dla_raportu = None
+    znacznik = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    foldery = [a for a in sys.argv[1:] if os.path.isdir(a)]
+    if foldery:
+        sys.stdout = _Dziennik(sys.stdout, os.path.join(os.path.dirname(foldery[0].rstrip("\\/")) or foldery[0],
+                                                         f"LOG_SPRAWDZENIA_{znacznik}.txt"))
+    print(f"sprawdz_hybrydowo_GEO {WERSJA} — folderów do sprawdzenia: {len(foldery)}")
     if GEO:
         AUTOTEST.update(autotest())
         print(("Autotest geometrii DXF: OK — " if AUTOTEST["ok"] else
@@ -2453,7 +2484,6 @@ if __name__ == "__main__":
             print("Pominięto (to nie folder):", arg)
 
     if WSZYSTKIE_WIERSZE or PODSUMOWANIE_FOLDEROW:
-        znacznik = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         sciezka_raport = os.path.join(folder_dla_raportu or ".", f"RAPORT_SPRAWDZENIA_{znacznik}.xlsx")
         try:
             zapisz_raport_xlsx(sciezka_raport)
