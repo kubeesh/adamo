@@ -1228,8 +1228,10 @@ def _dopasuj(P, cel, skala, okno, caly_arkusz=False):
     kandydaci.sort(key=lambda k: (k[0], k[1]))
     best = kandydaci[0]
     bez_lustra = [k for k in kandydaci if not k[2]]
-    if best[2] and bez_lustra and bez_lustra[0][0] == 0:
-        # część symetryczna: skoro DXF BEZ lustra mieści się w tolerancji, lustro nie ma znaczenia
+    if best[2] and bez_lustra and not best[0] < 0.5 * bez_lustra[0][0]:
+        # Lustro tylko, gdy pasuje WYRAŹNIE lepiej (o połowę mniej punktów poza tolerancją). Część
+        # symetryczna — także z wadą w jednym narożniku — pasuje bez lustra tak samo dobrze, a wtedy
+        # podgląd i współrzędne różnic mają być po tej samej stronie co w DXF.
         best = bez_lustra[0]
     _, ocena, lustro, M, t, korelacja = best
     Q = P @ M.T + t
