@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-sprawdz_hybrydowo_GEO.py v4 — jak v3 (geometria DXF), PLUS kontrola geometrii 3D z pliku STP
+sprawdz_hybrydowo_GEO.py v5 (v4 + kontur DXF vs rysunek) — jak v3 (geometria DXF), PLUS kontrola geometrii 3D z pliku STP
 (grubość i gabaryt każdej części z rzeczywistej bryły, nie tylko z opisu/nazwy pliku) ORAZ
 czytelny, strukturalny raport zbiorczy .xlsx (kolorowane błędy/uwagi, sortowanie po pozycji BOM
 = dokładne miejsce błędu w strukturze łyżki), zamiast samej ściany tekstu w konsoli.
@@ -19,6 +19,12 @@ wiersze): gabaryt bryły z STP zależy od ułożenia części w złożeniu (obr�
 na GE98022-S2 dał 6 "błędów" przy w 100% poprawnej dokumentacji (każdy odtworzony samym obrotem
 płaskiego konturu z DXF, błąd <= 0,7 mm). O zgodności decydują DXF, PDF i BOM. Na końcu arkusza
 raportu jest podsumowanie: czy wszystkie DXF są zgodne z BOM + objaśnienie wierszy STP.
+2026-10-08 (v5) — kontrola KONTURU DXF vs RYSUNEK PDF (zgłoszenie: "DXF nie pokrywa się z rysunkiem,
+fazy zepsute" — v4 porównywała tylko gabaryt z BOM, więc zła faza przechodziła): przerwy i wolne końce
+konturu, rozgałęzienia (nieprzycięty narożnik po fazie, linie fazy/ukosu krawędzi), podwójne linie,
+elementy dorysowane na warstwie 0, fazy narożników vs notki faz na rysunku ("4x 10 x 45°"), otwory vs
+Ø na rysunku, współśrodkowe okręgi (pogłębienie otworu w DXF), gabaryt DXF vs tabliczka PDF, gdy BOM
+nie ma wymiarów. Szczegóły i progi: sekcja "kontur DXF vs rysunek" niżej. Testy: testy/test_kontur.py.
 
   Kategorie części (z DESCRIPTION + flag + struktury BOM):
   - blacha "PL t x a x b" (Normal)          -> DXF + PDF (99% archiwum),
@@ -78,6 +84,7 @@ Na końcu zapisuje jeden zbiorczy raport .xlsx (obok pierwszego podanego folderu
 """
 import atexit
 import datetime
+import math
 import os
 import re
 import sys
@@ -92,7 +99,9 @@ except ImportError as e:
 
 try:
     import ezdxf
+    import numpy as np  # zależność ezdxf, więc jest zawsze razem z nim
     from ezdxf import bbox as ezbbox
+    from ezdxf import path as ezpath
     GEO = True
 except ImportError:
     GEO = False  # bez ezdxf dziala jak zwykla wersja v2 (bez kontroli geometrii DXF)
@@ -341,7 +350,45 @@ def czytaj_pdf(path):
     m = re.search(r"(S355(?:J2G3|J2|MC)?|HARDOX\s*\d{3}|HB\s*\d{3})", text, re.I)
     if m:
         out["mat"] = m.group(1)
+    out.update(wymiary_rysunku(text))
     return out
+
+
+LICZBA = r"(\d+(?:[.,]\d+)?)"
+
+
+def _liczba(s):
+    return float(s.replace(",", "."))
+
+
+def wymiary_rysunku(text):
+    """Wymiary z tekstu rysunku PDF potrzebne do porównania z DXF:
+    - fazy: notki Inventora "5 x 45°", "2x 5 x 45°" (ilość z przodu), "FAZA 5x5";
+      nogi fazy = (d, d*tg(kąt)), posortowane;
+    - fi: średnice otworów "Ø10,5" — Inventor pisze Ø czcionką AIGDT, która w tekście PDF
+      daje literę "n" ("n10,5" = Ø10,5);
+    - gwinty: "M12" (w DXF jest wtedy otwór pod gwint, ~0,75-1,0 x M);
+    - promienie: "R15" (duże wycięcia okrągłe bywają wymiarowane promieniem);
+    - liczby: wszystkie liczby z rysunku (do sprawdzenia, czy faza z DXF jest zwymiarowana)."""
+    fazy = []
+    for m in re.finditer(r"(?<![\d.,])(?:(\d+)\s*[xX×]\s*)?" + LICZBA + r"\s*(?:mm)?\s*[xX×]\s*"
+                         + LICZBA + r"\s*(?:deg|[°º˚])", text):
+        d, kat = _liczba(m.group(2)), _liczba(m.group(3))
+        if d <= 0 or not 0 < kat < 90:
+            continue
+        nogi = tuple(sorted((round(d, 2), round(d * math.tan(math.radians(kat)), 2))))
+        fazy.append(dict(nogi=nogi, ile=int(m.group(1)) if m.group(1) else None,
+                         tekst=re.sub(r"\s+", " ", m.group(0)).strip()))
+    for m in re.finditer(r"FAZ[AY]?\s+" + LICZBA + r"\s*[xX×]\s*" + LICZBA
+                         + r"(?![\d.,])(?!\s*(?:deg|[°º˚]))", text, re.I):
+        a, b = _liczba(m.group(1)), _liczba(m.group(2))
+        nogi = (a, a) if b == 45 else tuple(sorted((a, b)))
+        fazy.append(dict(nogi=nogi, ile=None, tekst=re.sub(r"\s+", " ", m.group(0)).strip()))
+    fi = [_liczba(x) for x in re.findall(r"(?:[Ø⌀ø∅]|(?:(?<=[\s\dxX×(])|^)n)\s?" + LICZBA, text, re.M)]
+    gwinty = [_liczba(x) for x in re.findall(r"(?<![A-Za-z])M" + LICZBA, text)]
+    promienie = [_liczba(x) for x in re.findall(r"(?<![A-Za-z])R\s?" + LICZBA, text)]
+    liczby = {_liczba(x) for x in re.findall(r"\d+(?:[.,]\d+)?", text)}
+    return dict(fazy=fazy, fi=fi, gwinty=gwinty, promienie=promienie, liczby=liczby)
 
 
 # ---------------------------------------------------------------- geometria DXF
@@ -429,6 +476,360 @@ def geo_porownaj_3d(b_dims, dims3):
         return None
     dev = max(abs(p - f) for p, f in zip(plan, znaleziony))
     return dev, plan, znaleziony
+
+
+# ---------------------------------------------------------------- kontur DXF vs rysunek (fazy, otwory)
+# 2026-10-08 — przełożony zgłosił DXF niezgodny z rysunkiem i "zepsute fazy", których program nie
+# wyłapał: wcześniejsza kontrola porównywała tylko GABARYT konturu z BOM, a faza 5 mm prawie nie
+# zmienia gabarytu. Ta część czyta sam kontur, tak jak zobaczy go wypalarka:
+#   - przerwy / wolne końce linii (kontur niedomknięty, linia wystaje za narożnik),
+#   - rozgałęzienia (linia kończy się na środku innej albo 3+ linie w jednym punkcie) — typowy
+#     ślad fazy dorysowanej bez przycięcia starego narożnika, albo linii fazy/ukosu krawędzi
+#     wyeksportowanej z widoku, którą laser by wyciął,
+#   - podwójne linie, elementy dorysowane ręcznie na warstwie "0" (opisane w PORADNIKU od
+#     03.07.2026, ale w wersji v4 nie było ich w kodzie),
+#   - fazy narożników i otwory z DXF porównane z notkami/wymiarami na rysunku PDF,
+#   - współśrodkowe okręgi (faza/pogłębienie otworu wyeksportowane jako drugi okrąg).
+STYK_TOL = 0.05      # mm — końce bliżej siebie = połączone (CAM i tak je skleja)
+PRZERWA_MAX = 2.0    # mm — dwa wolne końce bliżej siebie = "przerwa", dalej = "wolny koniec"
+FAZA_MAX = 60.0      # mm — dłuższy odcinek nie jest traktowany jako faza narożnika
+FAZA_TOL = 0.5       # mm — tolerancja nogi fazy DXF vs rysunek
+FAZA_MIN_RYS = 2.0   # mm — fazy z rysunku do tej wielkości to łamanie krawędzi, nie kontur
+OTWOR_TOL = 0.15     # mm — tolerancja średnicy otworu DXF vs Ø z rysunku
+WYSTAJE_MAX = 15.0   # mm — dorysowany element dalej poza obrysem = zbłąkana geometria
+
+# warstwy, które nie są cięte (gięcie, linie ukryte/osie/styczne, wymiary, ramki, trasowanie);
+# warstwa "Widoczne wąskie" to m.in. 3/4 okręgu gwintu — otwarty łuk, nie kontur
+WARSTWY_NIE_TNACE = re.compile(
+    r"BEND|TANGENT|TOOL_CENTER|ARC_CENTER|ALTREP|UNCONSUMED|ROLL|FEATURE|GI[EĘ]CI|"
+    r"UKRYT|HIDDEN|OSI|O[SŚ]\b|CENTER|CENTRE|SYMETR|STYCZN|W[AĄ]SK|"
+    r"WYMIAR|DIM|TEXT|TEKST|ANNOT|TYTU|TITLE|RAMK|BORDER|GRANIC|KRESK|HATCH|DEFPOINTS|"
+    r"TRAS|GRAW|GRAV|NAPIS|MARK", re.I)
+
+
+def _klastry(punkty, tol):
+    """Grupuje punkty leżące bliżej niż tol (siatka + union-find). Zwraca listę list indeksów."""
+    rodzic = list(range(len(punkty)))
+
+    def korzen(i):
+        while rodzic[i] != i:
+            rodzic[i] = rodzic[rodzic[i]]
+            i = rodzic[i]
+        return i
+
+    siatka = {}
+    for i, (x, y) in enumerate(punkty):
+        siatka.setdefault((math.floor(x / tol), math.floor(y / tol)), []).append(i)
+    for (cx, cy), idx in siatka.items():
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in siatka.get((cx + dx, cy + dy), ()):
+                    for i in idx:
+                        if i < j and math.dist(punkty[i], punkty[j]) <= tol:
+                            rodzic[korzen(i)] = korzen(j)
+    grupy = {}
+    for i in range(len(punkty)):
+        grupy.setdefault(korzen(i), []).append(i)
+    return list(grupy.values())
+
+
+def _prymitywy_dxf(doc):
+    """Elementy tnące z modelspace rozbite na LINE/ARC/CIRCLE/SPLINE/ELLIPSE (polilinie
+    rozbijane na odcinki i łuki), każdy jako łamana pts (krok 0,01 mm na łukach)."""
+    out = []
+
+    def dodaj(e, warstwa):
+        t = e.dxftype()
+        if t in ("LWPOLYLINE", "POLYLINE"):
+            try:
+                for v in e.virtual_entities():
+                    dodaj(v, warstwa)
+            except Exception:
+                pass
+            return
+        if t not in ("LINE", "ARC", "CIRCLE", "SPLINE", "ELLIPSE"):
+            return
+        try:
+            pts = np.array([(v.x, v.y) for v in ezpath.make_path(e).flattening(0.01)])
+        except Exception:
+            return
+        if len(pts) < 2:
+            return
+        dl = float(np.hypot(*np.diff(pts, axis=0).T).sum())
+        if dl < STYK_TOL:
+            return  # "linia" długości 0 — artefakt eksportu
+        p = dict(typ=t, warstwa=warstwa, pts=pts, dl=dl, reczny=warstwa == "0",
+                 zamk=t == "CIRCLE" or math.dist(pts[0], pts[-1]) < STYK_TOL)
+        if t == "CIRCLE":
+            p["srodek"] = (e.dxf.center.x, e.dxf.center.y)
+            p["fi"] = 2 * e.dxf.radius
+        out.append(p)
+
+    for e in doc.modelspace():
+        warstwa = e.dxf.get("layer", "0")
+        if not WARSTWY_NIE_TNACE.search(warstwa):
+            dodaj(e, warstwa)
+    return out
+
+
+def _sygnatura(p):
+    """Ten sam element narysowany 2x daje tę samą sygnaturę (niezależnie od kierunku)."""
+    if p["typ"] == "CIRCLE":
+        return ("C", round(p["srodek"][0], 2), round(p["srodek"][1], 2), round(p["fi"], 2))
+    konce = sorted((tuple(np.round(p["pts"][0], 2)), tuple(np.round(p["pts"][-1], 2))))
+    return (p["typ"], tuple(konce), round(p["dl"], 1), tuple(np.round(p["pts"].mean(axis=0), 1)))
+
+
+def _faza(S, sasiad_a, sasiad_b):
+    """Odcinek S między dwoma odcinkami = faza narożnika, jeśli przedłużenia sąsiadów
+    przecinają się za S (wirtualny narożnik V) pod kątem 45-135°. Zwraca (noga1, noga2, V)."""
+    a, b = S["pts"][0], S["pts"][-1]
+    (E1, f1), (E2, f2) = sasiad_a, sasiad_b
+    u1 = (f1 - a) / np.linalg.norm(f1 - a)
+    u2 = (f2 - b) / np.linalg.norm(f2 - b)
+    if abs(float(np.dot(u1, u2))) > 0.7072:   # kąt narożnika poza 45-135°
+        return None
+    try:
+        t1, t2 = np.linalg.solve(np.array([-u1, u2]).T, b - a)  # a - t1*u1 = b - t2*u2 = V
+    except np.linalg.LinAlgError:
+        return None
+    if not (0.1 < t1 <= FAZA_MAX and 0.1 < t2 <= FAZA_MAX):
+        return None
+    if S["dl"] >= min(E1["dl"], E2["dl"]):
+        return None
+    nogi = sorted((round(float(t1), 1), round(float(t2), 1)))
+    return nogi[0], nogi[1], tuple(a - t1 * u1)
+
+
+def dxf_analiza(path):
+    """Kontur DXF tak, jak zobaczy go wypalarka. Zwraca słownik z listami problemów
+    (punkty w układzie współrzędnych DXF, żeby dało się je znaleźć w AutoCADzie)."""
+    prym = _prymitywy_dxf(ezdxf.readfile(path))
+    wynik = dict(duble=0, przerwy=[], wolne=[], rozgal=[], fazy=[], okregi=[],
+                 wspolsrodkowe=[], reczne=0, wystaje=[])
+    if not prym:
+        return wynik
+
+    # --- podwójne linie (zdublowane elementy usuwamy przed analizą konturu)
+    widziane, unikalne = set(), []
+    for p in prym:
+        s = _sygnatura(p)
+        if s in widziane:
+            wynik["duble"] += 1
+        else:
+            widziane.add(s)
+            unikalne.append(p)
+
+    # --- węzły konturu: każdy koniec otwartego elementu powinien stykać się z dokładnie jednym innym
+    otwarte = [p for p in unikalne if not p["zamk"]]
+    konce = []  # konce[2*i] = początek otwarte[i], konce[2*i+1] = koniec
+    for p in otwarte:
+        konce.append(tuple(p["pts"][0]))
+        konce.append(tuple(p["pts"][-1]))
+    grupy = _klastry(konce, STYK_TOL)
+    wezel = {}
+    for g in grupy:
+        for k in g:
+            wezel[k] = g
+
+    seg_a = np.vstack([p["pts"][:-1] for p in unikalne])
+    seg_b = np.vstack([p["pts"][1:] for p in unikalne])
+    seg_wl = np.concatenate([np.full(len(p["pts"]) - 1, i) for i, p in enumerate(unikalne)])
+    idx_w_unikalnych = {id(p): i for i, p in enumerate(unikalne)}
+
+    def na_innym_elemencie(pkt, wlasny):
+        d = seg_b - seg_a
+        dd = (d * d).sum(axis=1)
+        dd[dd == 0] = 1e-12
+        t = np.clip(((pkt - seg_a) * d).sum(axis=1) / dd, 0, 1)
+        odl = np.hypot(*(seg_a + d * t[:, None] - pkt).T)
+        return bool(((odl < STYK_TOL) & (seg_wl != wlasny)).any())
+
+    wolne = []
+    for g in grupy:
+        pkt = np.mean([konce[k] for k in g], axis=0)
+        if len(g) >= 3:
+            wynik["rozgal"].append(tuple(pkt))
+        elif len(g) == 1:
+            if na_innym_elemencie(pkt, idx_w_unikalnych[id(otwarte[g[0] // 2])]):
+                wynik["rozgal"].append(tuple(pkt))   # koniec linii na środku innej linii (T)
+            else:
+                wolne.append(tuple(pkt))
+    # wolne końce blisko siebie = przerwa w konturze; reszta = linia urwana / wystająca
+    uzyte = set()
+    for i, p in enumerate(wolne):
+        if i in uzyte:
+            continue
+        najbl = min(((math.dist(p, q), j) for j, q in enumerate(wolne) if j != i and j not in uzyte),
+                    default=None)
+        if najbl and najbl[0] <= PRZERWA_MAX:
+            uzyte.update((i, najbl[1]))
+            wynik["przerwy"].append((najbl[0], p))
+        else:
+            uzyte.add(i)
+            wynik["wolne"].append(p)
+
+    # --- fazy narożników: odcinek, którego oba końce łączą się z dokładnie jednym innym odcinkiem
+    for i, S in enumerate(otwarte):
+        if S["typ"] != "LINE" or S["dl"] > FAZA_MAX:
+            continue
+        sasiedzi = []
+        for e in (0, 1):
+            g = wezel[2 * i + e]
+            if len(g) != 2:
+                break
+            inny = g[0] if g[1] == 2 * i + e else g[1]
+            E = otwarte[inny // 2]
+            if E["typ"] != "LINE" or E is S:
+                break
+            sasiedzi.append((E, E["pts"][-1] if inny % 2 == 0 else E["pts"][0]))
+        else:
+            f = _faza(S, sasiedzi[0], sasiedzi[1])
+            if f:
+                wynik["fazy"].append(f)
+
+    # --- otwory i współśrodkowe okręgi
+    okregi = [p for p in unikalne if p["typ"] == "CIRCLE"]
+    wspol = set()
+    for g in _klastry([p["srodek"] for p in okregi], STYK_TOL):
+        fis = sorted({round(okregi[k]["fi"], 2) for k in g})
+        if len(fis) >= 2:
+            wynik["wspolsrodkowe"].append((fis, okregi[g[0]]["srodek"]))
+            wspol.update(g)
+    wynik["okregi"] = [(p["fi"], p["srodek"], p["reczny"], k in wspol) for k, p in enumerate(okregi)]
+
+    # --- elementy dorysowane ręcznie (warstwa "0"), gdy reszta pochodzi z eksportu Inventora
+    z_eksportu = [p for p in unikalne if not p["reczny"]]
+    reczne = [p for p in unikalne if p["reczny"]]
+    if z_eksportu and reczne:
+        wynik["reczne"] = len(reczne)
+        obrys = np.vstack([p["pts"] for p in z_eksportu])
+        lo, hi = obrys.min(axis=0), obrys.max(axis=0)
+        for p in reczne:
+            wyst = float(max((lo - p["pts"].min(axis=0)).max(), (p["pts"].max(axis=0) - hi).max(), 0))
+            if wyst > WYSTAJE_MAX:
+                wynik["wystaje"].append((wyst, tuple(p["pts"][0])))
+    return wynik
+
+
+def _mm(x):
+    return f"{x:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def _gdzie(punkty, ile=3):
+    s = ", ".join(f"({x:.1f}; {y:.1f})" for x, y in punkty[:ile])
+    return s + (" …" if len(punkty) > ile else "")
+
+
+def _lista_faz(fazy):
+    licz = {}
+    for n1, n2, _ in fazy:
+        licz[(n1, n2)] = licz.get((n1, n2), 0) + 1
+    return ", ".join(f"{_mm(a)}x{_mm(b)}" + (f" ({n} szt.)" if n > 1 else "") for (a, b), n in licz.items())
+
+
+def ocen_kontur(b, kat, ana, tresc):
+    """Zamienia wynik dxf_analiza (+ wymiary z rysunku PDF, jeśli jest) na listy
+    (błędy, uwagi). Każdy komunikat zaczyna się od ".DXF:", żeby trafił do kolumny Plik."""
+    bl, uw = [], []
+    ukos = "u" in b["flags"]
+    obrobka = "o" in b["flags"]
+    gieta = "p" in b["flags"]
+    przymiar = kat == "przygotowka" or re.search(r"PRZYMIAR|PRZYG", f"{b['title']} {b['desc']}", re.I)
+
+    if ana["duble"] >= 3:
+        bl.append(f".DXF: podwójne linie — {ana['duble']} elementów narysowanych 2x w tym samym miejscu "
+                  f"(laser tnie dwa razy po tym samym śladzie)")
+    elif ana["duble"]:
+        uw.append(f".DXF: podwójne linie — {ana['duble']} zdublowany element (bywa z eksportu)")
+
+    if ana["przerwy"]:
+        d_max = max(d for d, _ in ana["przerwy"])
+        bl.append(f".DXF: kontur — {len(ana['przerwy'])} przerw(a) w konturze (największa {_mm(d_max)} mm), "
+                  f"przy {_gdzie([p for _, p in ana['przerwy']])}")
+    if ana["wolne"]:
+        bl.append(f".DXF: kontur — {len(ana['wolne'])} wolnych końców linii (kontur niedomknięty albo linia "
+                  f"wystaje za narożnik), przy {_gdzie(ana['wolne'])}")
+    if ana["rozgal"]:
+        msg = (f".DXF: kontur — {len(ana['rozgal'])} rozgałęzień (linia kończy się na innej linii albo 3+ linie "
+               f"w jednym punkcie), przy {_gdzie(ana['rozgal'])} — nieprzycięty narożnik po dorysowaniu fazy "
+               f"albo linie fazy/ukosu krawędzi, które laser wytnie")
+        if ukos or gieta:
+            uw.append(msg + " (część " + ("z ukosowaniem" if ukos else "gięta")
+                      + " — sprawdź, czy to linia " + ("ukosu" if ukos else "gięcia") + " na warstwie cięcia)")
+        else:
+            bl.append(msg)
+    for fis, srodek in ana["wspolsrodkowe"]:
+        msg = (f".DXF: otwory — współśrodkowe okręgi Ø{' / Ø'.join(_mm(f) for f in fis)} przy "
+               f"{_gdzie([srodek])} — faza/pogłębienie otworu wyeksportowane do DXF, laser wytnie większy okrąg")
+        (uw if obrobka else bl).append(msg)
+    if ana["wystaje"] and not przymiar:
+        w = max(ana["wystaje"])
+        bl.append(f".DXF: dorysowane — element z warstwy 0 wystaje {w[0]:.0f} mm poza obrys części przy "
+                  f"{_gdzie([w[1]])} (zbłąkana geometria, cięcie w powietrzu)")
+    if ana["reczne"]:
+        uw.append(f".DXF: dorysowane — {ana['reczne']} element(y) dorysowane ręcznie na warstwie 0 (do wglądu)")
+
+    if not tresc:
+        return bl, uw
+
+    # --- otwory z DXF vs Ø na rysunku
+    fi_rys = tresc.get("fi", []) + [2 * r for r in tresc.get("promienie", [])]
+
+    def zwymiarowany(fi):
+        return (any(abs(fi - f) <= OTWOR_TOL for f in fi_rys)
+                or any(0.75 * d <= fi <= d + 0.5 for d in tresc.get("gwinty", [])))
+
+    if not obrobka and not przymiar:
+        reczne_bez = sorted({round(fi, 2) for fi, _, reczny, wsp in ana["okregi"]
+                             if reczny and not wsp and not zwymiarowany(fi)})
+        eksp_bez = sorted({round(fi, 2) for fi, _, reczny, wsp in ana["okregi"]
+                           if not reczny and not wsp and not zwymiarowany(fi)})
+        if reczne_bez:
+            bl.append(f".DXF: otwory — dorysowany otwór Ø{', Ø'.join(_mm(f) for f in reczne_bez)} (warstwa 0) "
+                      f"bez wymiaru Ø na rysunku PDF — produkcja nie wie o otworze")
+        if eksp_bez and tresc.get("fi"):   # stare rysunki bez wymiarów Ø — nie sprawdzamy
+            uw.append(f".DXF: otwory — otwór Ø{', Ø'.join(_mm(f) for f in eksp_bez)} z DXF nie występuje "
+                      f"w wymiarach rysunku (Ø na rysunku: {', '.join(_mm(f) for f in sorted(set(tresc['fi'])))})")
+
+    # --- fazy narożników z DXF vs notki faz na rysunku
+    fazy_dxf = ana["fazy"]
+    lagodnie = ukos or obrobka
+
+    def pasuje(n, m):
+        return abs(n[0] - m[0]) <= FAZA_TOL and abs(n[1] - m[1]) <= FAZA_TOL
+
+    rys = {}
+    for f in tresc.get("fazy", []):
+        if max(f["nogi"]) <= FAZA_MIN_RYS:
+            continue  # łamanie krawędzi (np. 1x45° na otworze) — nie ma go w konturze
+        r = rys.setdefault(f["nogi"], dict(teksty=[], ile=0, z_iloscia=False))
+        r["teksty"].append(f["tekst"])
+        r["ile"] += f["ile"] or 1
+        r["z_iloscia"] |= f["ile"] is not None
+    dopisek = " (część z ukosowaniem/obróbką — faza może być robiona później)" if lagodnie else ""
+    if rys:
+        for nogi, r in rys.items():
+            n = sum(1 for f in fazy_dxf if pasuje(f, nogi))
+            if n == 0:
+                (uw if lagodnie else bl).append(
+                    f".DXF: fazy — na rysunku faza {r['teksty'][0]}, w DXF brak takiej fazy ("
+                    + (f"fazy w DXF: {_lista_faz(fazy_dxf)}" if fazy_dxf else "w DXF nie ma żadnej fazy narożnika")
+                    + ")" + dopisek)
+            elif r["z_iloscia"] and n < r["ile"]:
+                (uw if lagodnie else bl).append(
+                    f".DXF: fazy — na rysunku {r['ile']}x faza {_mm(nogi[0])}x{_mm(nogi[1])}, w DXF tylko {n}" + dopisek)
+        obce = [f for f in fazy_dxf if not any(pasuje(f, nogi) for nogi in rys)]
+        if obce:
+            uw.append(f".DXF: fazy — w DXF faza {_lista_faz(obce)} przy {_gdzie([f[2] for f in obce])}, "
+                      f"której nie ma na rysunku (rysunek: {', '.join(r['teksty'][0] for r in rys.values())})")
+    elif fazy_dxf and tresc.get("liczby"):
+        nie = [f for f in fazy_dxf
+               if not any(abs(f[0] - x) <= FAZA_TOL or abs(f[1] - x) <= FAZA_TOL for x in tresc["liczby"])]
+        if nie:
+            uw.append(f".DXF: fazy — faza {_lista_faz(nie)} z DXF nie jest zwymiarowana na rysunku PDF, "
+                      f"przy {_gdzie([f[2] for f in nie])}")
+    return bl, uw
 
 
 # ---------------------------------------------------------------- geometria STP (3D)
@@ -577,6 +978,11 @@ def plik_i_reszta(opis):
 
 
 RODZAJ_WZORCE = [
+    (re.compile(r"^kontur —"), "kontur DXF (przerwy/rozgałęzienia)"),
+    (re.compile(r"^fazy —"), "fazy DXF vs rysunek"),
+    (re.compile(r"^otwory —"), "otwory DXF vs rysunek"),
+    (re.compile(r"^podwójne linie —"), "podwójne linie DXF"),
+    (re.compile(r"^dorysowane —"), "dorysowane ręcznie (warstwa 0)"),
     (re.compile(r"^BRAK (DXF|PDF)"), "plik brakujący"),
     (re.compile(r"geometria DXF|DXF zawiera więcej"), "geometria DXF"),
     (re.compile(r"bryła", re.I), "geometria STP (3D)"),  # prefiks ".STP:" juz wyciety do kolumny Plik
@@ -767,6 +1173,7 @@ def sprawdz(folder):
             uwagi.append(f"{etykieta}: PDF z prefiksem złożenia (wg wzorca PDF-y części są bez)")
 
         # --- zawartosc PDF
+        tresc = None
         if pdf:
             tresc = czytaj_pdf(os.path.join(folder, pdf["file"]))
             if "stamp" not in tresc:
@@ -812,6 +1219,33 @@ def sprawdz(folder):
                         problemy.append(opis_geo)
                     elif dev > GEO_TOL_INFO:
                         uwagi.append(f"{etykieta}: {opis_geo} — strefa szara")
+
+        # --- gabaryt DXF vs tabliczka PDF, gdy BOM nie ma 3 wymiarów (np. "PL 10" przygotówki)
+        if GEO and dxf and not dxf["asm"] and len(b["dims"]) != 3 and tresc and "dims" in tresc:
+            try:
+                bb = dxf_gabaryt(os.path.join(folder, dxf["file"]))
+            except Exception:
+                bb = None
+            if bb:
+                dev, plan, bbs = geo_porownaj(dict(b, dims=tresc["dims"]), dxf, bb)
+                opis_geo = (f"geometria DXF {bbs[0]:.0f}x{bbs[1]:.0f} vs rysunek PDF {plan[0]:g}x{plan[1]:g} "
+                            f"(odchyłka {dev:.1f} mm)")
+                if dev > GEO_TOL_BLAD and not ("p" in b["flags"] or "o" in b["flags"] or "u" in b["flags"]):
+                    problemy.append(opis_geo)
+                elif dev > GEO_TOL_INFO:
+                    uwagi.append(f"{etykieta}: {opis_geo} — strefa szara / część gięta lub obrabiana")
+
+        # --- kontur DXF tak, jak zobaczy go wypalarka + fazy/otwory vs rysunek PDF
+        if GEO and dxf and not dxf["asm"]:
+            ana = None
+            try:
+                ana = dxf_analiza(os.path.join(folder, dxf["file"]))
+            except Exception as e:
+                uwagi.append(f"{etykieta}: nie udało się przeanalizować konturu DXF ({type(e).__name__})")
+            if ana:
+                bl_k, uw_k = ocen_kontur(b, kat, ana, tresc)
+                problemy.extend(bl_k)
+                uwagi.extend(f"{etykieta}: {u}" for u in uw_k)
 
         # --- geometria STP (bryła 3D) vs DESCRIPTION — niezależne od DXF, tylko jeśli mamy mapę.
         # Tylko INFORMACYJNIE (poziom "INFO STP", nie liczy się do błędów): gabaryt bryły z STP

@@ -56,6 +56,47 @@ CO JESZCZE ŁAPIE W GEOMETRII (od 03.07.2026)
    która w tekście PDF daje literę "n" (np. "n10,5" = Ø10,5) -
    skrypt o tym wie.
 
+   (UWAGA: w wersji z 30.09.2026 punktów 1 i 2 faktycznie nie było
+   w programie - przywrócone 08.10.2026, patrz niżej.)
+
+NOWOŚĆ (08.10.2026): KONTUR DXF vs RYSUNEK - FAZY, OTWORY, PRZERWY
+------------------------------------------------------------------
+Powód: DXF z "zepsutymi fazami" przechodził jako zgodny, bo program
+porównywał tylko GABARYT (długość x szerokość) - a faza 5 mm prawie
+nie zmienia gabarytu. Teraz program czyta sam kontur tak, jak zobaczy
+go wypalarka, i porównuje go z rysunkiem PDF:
+
+1. PRZERWY I WOLNE KOŃCE - kontur niedomknięty (przerwa > 0,05 mm)
+   albo linia urwana / wystająca za narożnik            -> BŁĄD
+2. ROZGAŁĘZIENIA - linia kończy się na środku innej linii albo 3+
+   linie schodzą się w jednym punkcie. Typowo: faza dorysowana bez
+   przycięcia starego narożnika, albo linia fazy/ukosu krawędzi
+   wyeksportowana z widoku (laser by ją wyciął)          -> BŁĄD
+   (części z ukosowaniem "u" i gięte "p"                 -> UWAGA)
+3. FAZY NAROŻNIKÓW vs NOTKI NA RYSUNKU - program szuka na PDF notek
+   typu "10 x 45°", "4x 10 x 45°", "FAZA 5x5" i fazy w DXF:
+      faza z rysunku, której nie ma w DXF / ma inny wymiar -> BŁĄD
+      na rysunku "4x", a w DXF mniej faz                  -> BŁĄD
+      faza w DXF, której nie ma na rysunku                -> UWAGA
+      (części z ukosowaniem "u" lub obróbką "o"           -> UWAGA)
+   Fazy do 2 mm z rysunku to łamanie krawędzi - pomijane.
+   Gdy rysunek nie ma notek faz, a faza z DXF nie jest nigdzie
+   zwymiarowana                                           -> UWAGA
+4. OTWORY - każdy okrąg z DXF musi mieć Ø na rysunku (tolerancja
+   0,15 mm; otwór pod gwint M12 też się liczy):
+      otwór dorysowany na warstwie 0 bez Ø                 -> BŁĄD
+      otwór z eksportu bez Ø (gdy rysunek ma wymiary Ø)    -> UWAGA
+   Dwa współśrodkowe okręgi (faza/pogłębienie otworu wyeksportowane
+   do DXF - laser wytnie większy)                          -> BŁĄD
+5. GABARYT DXF vs TABLICZKA PDF - gdy BOM nie ma wymiarów (np. "PL 10"),
+   DXF jest porównywany z wymiarami z tabliczki rysunku.
+
+Przy każdym problemie raport podaje współrzędne z DXF, np.
+"przy (200.0; 100.0)" - w AutoCADzie: polecenie ZOOM, opcja
+Środek (Center) i wpisz te współrzędne.
+Warstwy, które nie są cięte (gięcie, ukryte, osie, styczne, wymiary,
+ramka, trasowanie, "Widoczne wąskie" z gwintami) są pomijane.
+
 NOWOŚĆ (18.07.2026): KONTROLA GEOMETRII 3D Z PLIKU STP
 --------------------------------------------------------
 Jeśli w folderze projektu jest plik .stp/.step (eksport całego
