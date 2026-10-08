@@ -1,0 +1,138 @@
+================================================================
+  SPRAWDZ HYBRYDOWO GEO - PORADNIK (prostymi slowami)
+================================================================
+
+CO TO ROBI
+----------
+To jest DOKŁADNIE ten sam skrypt co "SPRAWDZ HYBRYDOWO"
+(sprawdza BOM vs nazwy plików vs zawartość PDF - patrz poradnik
+w tamtym folderze), ale z JEDNĄ RZECZĄ EKSTRA:
+
+   OTWIERA KAŻDY PLIK DXF I MIERZY JEGO GEOMETRIĘ.
+
+Czyli: bierze kontur z DXF-a, liczy jego gabaryt (długość x
+szerokość) i porównuje z wymiarami z BOM-u. Wyłapuje sytuację,
+w której nazwa pliku jest dobra, rysunek jest dobry, ale sam
+DXF (to, co pojedzie na wypalarkę!) ma inne wymiary niż część
+w BOM. To jest błąd klasy K9 - wypalona część nie pasuje.
+
+Działa też dla części GIĘTYCH - w BOM-ie Inventor podaje wymiar
+rozwinięcia, a DXF to właśnie rozwinięcie, więc porównanie ma sens.
+
+TOLERANCJE
+----------
+   różnica do 1,5 mm   -> OK, cisza
+   różnica 1,5 - 3 mm  -> UWAGA (strefa szara, spójrz)
+   różnica ponad 3 mm  -> BŁĄD
+
+CO JESZCZE ŁAPIE W GEOMETRII (od 03.07.2026)
+--------------------------------------------
+1. PODWÓJNE LINIE - ta sama linia/łuk/splajn narysowana 2x w tym
+   samym miejscu (np. wklejony drugi raz cały kontur). Laser tnie
+   wtedy dwa razy po tym samym śladzie.
+      kilka sztuk naraz (3+)      -> BŁĄD
+      pojedynczy zdublowany odcinek -> UWAGA (bywa z eksportu)
+   Nakładka linii Widoczne/Ukryte i "linie" długości 0 to normalne
+   artefakty eksportu - skrypt je ignoruje.
+
+2. ELEMENTY DORYSOWANE RĘCZNIE PO EKSPORCIE - Inventor kładzie
+   kontur na warstwach "Widoczne (ISO)" / IV_* / AM_*, a to, co
+   ktoś dorysuje ręcznie (AutoCAD), ląduje na warstwie "0".
+   Samo dorysowanie to NIE błąd (robimy tak często - fazki,
+   zaokrąglenia, otwory), ale skrypt pilnuje, żeby:
+      - dorysowany OTWÓR był zwymiarowany na rysunku PDF
+        (brak Ø na rysunku -> BŁĄD; produkcja nie wie o otworze),
+      - dorysowany element NIE WYSTAWAŁ poza obrys części
+        (wystaje >15 mm -> BŁĄD; zbłąkana geometria, cięcie
+        w powietrzu),
+      - reszta dorysowanych -> UWAGA (zbiorczo, do wglądu).
+   Wyjątki (żeby nie było fałszywych alarmów):
+      - części z obróbką (flaga "o"): otwór wypala się z naddatkiem
+        (np. DXF Ø64, na gotowo Ø70) - kontrola Ø wyłączona,
+      - przygotówki/przymiary: trasowanie może wychodzić poza obrys,
+      - stare rysunki bez wymiarów Ø (tabliczki GJERSTAD) - otwory
+        z eksportu Inventora nie są sprawdzane.
+   Ciekawostka techniczna: Inventor pisze symbol Ø czcionką AIGDT,
+   która w tekście PDF daje literę "n" (np. "n10,5" = Ø10,5) -
+   skrypt o tym wie.
+
+NOWOŚĆ (18.07.2026): KONTROLA GEOMETRII 3D Z PLIKU STP
+--------------------------------------------------------
+Jeśli w folderze projektu jest plik .stp/.step (eksport całego
+złożenia z Inventora - jest w większości folderów GJERSTAD),
+skrypt go otwiera PRZEZ INVENTORA (musi być zainstalowany na tym
+komputerze) i dla każdej części w BOM sprawdza RZECZYWISTĄ bryłę
+3D (grubość + gabaryt), nie tylko nazwę pliku czy tabliczkę PDF.
+To wyłapuje sytuację, gdy sam MODEL 3D (to, z czego zrobiono
+rysunek) ma inne wymiary niż BOM - a to się zdarza nawet gdy DXF
+i PDF wyglądają OK, bo BOM bywa nieaktualizowany po zmianie modelu.
+
+OD 30.09.2026 WYNIKI Z PLIKU STP SĄ TYLKO INFORMACYJNE
+(poziom "INFO STP", niebieskie wiersze, NIE liczą się do błędów).
+Powód: STP pokazuje część tak, jak LEŻY W ZŁOŻENIU - obróconą,
+pochyloną, po gięciu. Wtedy jej gabaryt jest inny niż płaski
+wymiar w BOM, mimo że wszystko jest dobrze. Na GE98022-S2 dało
+to 6 "błędów" przy całkowicie poprawnej dokumentacji (np. blacha
+12 mm pochylona o 30° w złożeniu ma gabaryt 132x213 zamiast 12x241).
+O zgodności dokumentacji decydują DXF, PDF i BOM.
+Niebieski wiersz sprawdź tylko wtedy, gdy przy tej samej części
+jest też czerwony albo żółty wiersz z DXF/PDF.
+
+Brak pliku STP w folderze NIE jest błędem - część projektów go
+po prostu nie ma, ta kontrola się wtedy po cichu pomija.
+Pierwsze otwarcie STP w danym uruchomieniu może potrwać do minuty
+(Inventor musi się uruchomić/doładować plik) - kolejne foldery
+w tym samym uruchomieniu są szybsze.
+
+NOWOŚĆ: RAPORT ZBIORCZY .XLSX
+------------------------------
+Po sprawdzeniu WSZYSTKICH przeciągniętych folderów skrypt zapisuje
+jeden plik "RAPORT_SPRAWDZENIA_<data_godzina>.xlsx" obok pierwszego
+folderu i sam go otwiera. Dwie zakładki:
+  - "Błędy i uwagi" - jeden wiersz na problem, z kolumnami Folder /
+    POS (dokładna pozycja w strukturze BOM - np. 7.3.2) / Część /
+    Poziom (BŁĄD czerwony, UWAGA żółty, INFO STP niebieski) /
+    Plik (DXF/PDF/STP) / Rodzaj / Opis. Można sortować i filtrować
+    jak w każdym excelu.
+    NA KOŃCU tej zakładki jest PODSUMOWANIE każdego folderu:
+      DXF        - zielone "Wszystkie pliki DXF zgodne z BOM"
+                   albo czerwone "DXF NIEZGODNE" z listą części,
+      Model .stp - objaśnienie niebieskich wierszy (patrz wyżej),
+      Wynik      - "Dokumentacja zgodna z BOM" albo liczba błędów.
+    Wystarczy spojrzeć na koniec arkusza, żeby wiedzieć, czy jest OK.
+  - "Podsumowanie folderów" - ile błędów/uwag w każdym folderze,
+    stan DXF (ZGODNE/NIEZGODNE) i liczba wierszy INFO STP;
+    jednym spojrzeniem widać, które wydanie wymaga uwagi.
+Konsola (czarne okno) nadal pokazuje to samo co wcześniej - xlsx
+to dodatek, nie zamiennik.
+
+JAK URUCHOMIĆ
+-------------
+Przeciągnij folder wydania (albo kilka naraz) na plik:
+   "Sprawdz hybrydowo GEO - przeciagnij folder.bat"
+
+KIEDY UŻYWAĆ TEJ WERSJI, A KIEDY ZWYKŁEJ
+----------------------------------------
+- Zwykła wersja jest szybsza - do codziennej kontroli wystarcza.
+- Wersja GEO jest wolniejsza (musi otworzyć każdy DXF), ale
+  sprawdza więcej. Używaj jej, gdy:
+    * wydanie jest duże albo ważne,
+    * była rewizja i coś się zmieniało w wymiarach,
+    * masz podejrzenie, że DXF nie pasuje do rysunku.
+
+UWAGA: to wersja oznaczona jako TESTOWA. Jak wyrzuci dziwny
+błąd geometrii, najpierw sprawdź część ręcznie, zanim uznasz,
+że DXF jest zły (np. części z wycięciami mogą mieć gabaryt
+konturu inny niż wymiary katalogowe).
+
+WYMAGANIA
+---------
+Python + biblioteki: pip install openpyxl pymupdf ezdxf pywin32
+Jeśli brakuje biblioteki "ezdxf", skrypt NIE sprawdza geometrii DXF.
+Jeśli brakuje "pywin32" ALBO nie ma zainstalowanego Inventora na
+tym komputerze, skrypt NIE sprawdza geometrii STP.
+W obu przypadkach reszta (BOM/nazwy/PDF) działa normalnie - brak
+biblioteki nigdy nie zatrzymuje całej kontroli, tylko wyłącza tę
+jedną dodatkową sprawdzankę.
+(Wersja .exe z tego folderu ma to już wbudowane - nic nie trzeba
+instalować, poza samym Inventorem do kontroli STP.)
