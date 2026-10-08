@@ -59,6 +59,36 @@ CO JESZCZE ŁAPIE W GEOMETRII (od 03.07.2026)
    (UWAGA: w wersji z 30.09.2026 punktów 1 i 2 faktycznie nie było
    w programie - przywrócone 08.10.2026, patrz niżej.)
 
+NOWOŚĆ (08.10.2026): NAKŁADKA DXF NA RYSUNEK 1:1
+------------------------------------------------
+Rysunki PDF z Inventora są WEKTOROWE - linie widoku są zapisane
+w PDF jako prawdziwe odcinki i łuki, nie jako obrazek. Program:
+  1. szuka na rysunku widoku, którego obrys ma wymiary DXF w którejś
+     ze skal (bierze też skale z opisu widoku, np. "VIEW1 ( 1 : 10 )"),
+  2. nakłada na niego kontur DXF - próbuje obrotów co 90° i odbicia
+     lustrzanego, dosuwa dokładnie (dokładność ~0,1 mm przy 1:10),
+  3. mierzy, jak daleko każdy punkt DXF leży od linii rysunku.
+Wynik:
+   DXF odbiega od rysunku o więcej niż 1 mm        -> BŁĄD
+      (podaje miejsce we współrzędnych DXF i maks. odchyłkę;
+       części z obróbką "o"                         -> UWAGA)
+   na rysunku jest otwór/wycięcie, którego nie ma
+      w DXF                                         -> BŁĄD
+      (przy ukosowaniu "u" linie ukosu tuż przy krawędzi są
+       pomijane - na rysunku są, w DXF ich być nie ma)
+   DXF pasuje dopiero po odbiciu lustrzanym          -> UWAGA
+      (części symetryczne nie dają tej uwagi)
+   na rysunku nie ma widoku o wymiarach DXF          -> jedna zbiorcza
+      UWAGA na folder (brak widoku płaskiego/rozwinięcia)
+Gdy nakładka znalazła widok, porównanie notek faz (punkt 3 niżej) jest
+pomijane - nakładka sprawdza każdy narożnik dokładniej, a notki typu
+"7,00 X 45° Chamfer" to często fazy KRAWĘDZI pod spaw (przekroje), których
+w konturze DXF nie ma.
+
+PODGLĄD: obok raportu .xlsx powstaje "NAKLADKI_<data>.pdf" - dla każdej
+części z różnicą strona rysunku z naniesionym konturem DXF: zielone
+kropki = zgodne z rysunkiem, czerwone = różnica. Od razu widać, gdzie.
+
 NOWOŚĆ (08.10.2026): KONTUR DXF vs RYSUNEK - FAZY, OTWORY, PRZERWY
 ------------------------------------------------------------------
 Powód: DXF z "zepsutymi fazami" przechodził jako zgodny, bo program
@@ -83,9 +113,9 @@ go wypalarka, i porównuje go z rysunkiem PDF:
    Gdy rysunek nie ma notek faz, a faza z DXF nie jest nigdzie
    zwymiarowana                                           -> UWAGA
 4. OTWORY - każdy okrąg z DXF musi mieć Ø na rysunku (tolerancja
-   0,15 mm; otwór pod gwint M12 też się liczy):
+   0,15 mm; otwór pod gwint też się liczy, np. M12 -> Ø10,2):
       otwór dorysowany na warstwie 0 bez Ø                 -> BŁĄD
-      otwór z eksportu bez Ø (gdy rysunek ma wymiary Ø)    -> UWAGA
+      otwór z eksportu bez Ø (gdy rysunek ma wymiary Ø)    -> BŁĄD
    Dwa współśrodkowe okręgi (faza/pogłębienie otworu wyeksportowane
    do DXF - laser wytnie większy)                          -> BŁĄD
 5. GABARYT DXF vs TABLICZKA PDF - gdy BOM nie ma wymiarów (np. "PL 10"),

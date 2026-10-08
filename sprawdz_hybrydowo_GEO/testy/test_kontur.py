@@ -160,7 +160,7 @@ def test_dorysowany_otwor_bez_wymiaru():
 
 def test_otwor_z_eksportu_niezgodny_z_rysunkiem():
     _, (bl, uw) = ocena(zapisz_dxf("otwor_eksp.dxf", prostokat(), okregi=[(50, 50, 7)]), "2x n12")
-    assert not bl and any("otwór Ø14 z DXF nie występuje" in x for x in uw), (bl, uw)
+    assert any("otwór Ø14 z DXF nie występuje" in x for x in bl), (bl, uw)
     _, (bl, uw) = ocena(zapisz_dxf("gwint.dxf", prostokat(), okregi=[(50, 50, 5.1)]), "M12")
     assert not bl and not uw, (bl, uw)   # otwór pod gwint M12 (Ø10,2)
 
