@@ -414,8 +414,11 @@ def main():
 
 
 def zaliczony(w):
-    return (len(w["wykryte"]) == 4 * len(WADY) and not w["falsz_bl"] and not w["falsz_uw"]
-            and not w["dobre_niezweryf"] and not w["wada_zgodna"])
+    # Wada zgłoszona tylko jako UWAGA (strefa szara nakładki: tolerancja..2 x tolerancja) jest dopuszczalna —
+    # taka część i tak nie dostaje statusu "ZGODNY 1:1" (sprawdza to "wada_zgodna"). Najważniejsze:
+    # żadna wada nie przechodzi jako zgodna, a dobre części nie mają fałszywych alarmów.
+    return (len(w["wykryte"]) + len(w["tylko_uwaga"]) == 4 * len(WADY) and not w["przeocz"] and not w["zly_typ"]
+            and not w["falsz_bl"] and not w["falsz_uw"] and not w["dobre_niezweryf"] and not w["wada_zgodna"])
 
 
 def test_100_czesci():

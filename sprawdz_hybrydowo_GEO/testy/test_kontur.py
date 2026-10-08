@@ -87,8 +87,9 @@ def test_czysty_kontur_z_fazami():
 
 
 def test_zla_faza_vs_rysunek():
-    _, (bl, _) = ocena(zapisz_dxf("faza7.dxf", prostokat_z_fazami(7)), "4x 10 x 45°")
-    assert any("fazy — na rysunku faza 4x 10 x 45°" in x and "7x7 (4 szt.)" in x for x in bl), bl
+    _, (bl, uw) = ocena(zapisz_dxf("faza7.dxf", prostokat_z_fazami(7)), "4x 10 x 45°")
+    # bez dopasowanego widoku (sam tekst) — UWAGA, bo notka może dotyczyć fazy krawędzi
+    assert not bl and any("fazy — na rysunku faza 4x 10 x 45°" in x and "7x7 (4 szt.)" in x for x in uw), (bl, uw)
 
 
 def test_zla_faza_przy_ukosowaniu_to_uwaga():
@@ -97,15 +98,15 @@ def test_zla_faza_przy_ukosowaniu_to_uwaga():
 
 
 def test_brak_fazy_w_dxf():
-    _, (bl, _) = ocena(zapisz_dxf("bez_faz.dxf", prostokat()), "10 x 45°")
-    assert any("w DXF nie ma żadnej fazy" in x for x in bl), bl
+    _, (bl, uw) = ocena(zapisz_dxf("bez_faz.dxf", prostokat()), "10 x 45°")
+    assert not bl and any("w DXF nie ma żadnej fazy" in x for x in uw), (bl, uw)
 
 
 def test_za_malo_faz():
     # narożnik (200,0) bez fazy, pozostałe trzy z fazą 10x10
     linie = [(10, 0, 200, 0, WID), (200, 0, 200, 90, WID)] + prostokat_z_fazami(10)[3:]
-    _, (bl, _) = ocena(zapisz_dxf("3fazy.dxf", linie), "4x 10 x 45°")
-    assert any("4x faza 10x10, w DXF tylko 3" in x for x in bl), bl
+    _, (bl, uw) = ocena(zapisz_dxf("3fazy.dxf", linie), "4x 10 x 45°")
+    assert not bl and any("4x faza 10x10, w DXF tylko 3" in x for x in uw), (bl, uw)
 
 
 def test_nieprzyciety_narozniki_po_fazie():
@@ -232,9 +233,34 @@ def test_autotest_wykrywa_awarie():
         S._odl_do_odcinkow = oryginal
 
 
+def test_stp_dopasowanie_nazw():
+    mapa = {"PG4136348:1": (1, 2, 3), "PG999 - TOP PLATE": (4, 5, 6), "PG12.IPT": (7, 8, 9), "PG123": (0, 0, 0)}
+    assert S.stp_szukaj(mapa, "PG4136348") == (1, 2, 3)
+    assert S.stp_szukaj(mapa, "pg999") == (4, 5, 6)
+    assert S.stp_szukaj(mapa, "PG12") == (7, 8, 9)        # nie myli z PG123
+    assert S.stp_szukaj(mapa, "PG1") is None
+
+
+def test_raport_stp_w_osobnej_zakladce():
+    S.WSZYSTKIE_WIERSZE.clear()
+    S.PODSUMOWANIE_FOLDEROW.clear()
+    S.WERYFIKACJA_DXF.clear()
+    w = dict(folder="F", pos="1", tytul="", plik="", rodzaj="")
+    S.WSZYSTKIE_WIERSZE += [dict(w, part="A", poziom="INFO STP", opis="bryła A"),
+                            dict(w, part="B", poziom="INFO STP", opis="bryła B"),
+                            dict(w, part="B", poziom="BŁĄD", opis="błąd B")]
+    sciezka = os.path.join(TMP, "raport_stp.xlsx")
+    S.zapisz_raport_xlsx(sciezka)
+    wb = openpyxl.load_workbook(sciezka)
+    glowna = [r[2] for r in wb["Błędy i uwagi"].iter_rows(min_row=2, values_only=True) if r and r[4] == "INFO STP"]
+    stp = [r[2] for r in wb["Model STP (info)"].iter_rows(min_row=2, values_only=True)]
+    assert glowna == ["B"] and stp == ["A"], (glowna, stp)
+    S.WSZYSTKIE_WIERSZE.clear()
+
+
 def test_caly_folder():
-    """Cały przebieg sprawdz() na folderze wydania: BOM + DXF + PDF."""
-    for nazwa, faza, oczekiwany in (("GE9001", 10, 0), ("GE9002", 7, 1)):
+    """Cały przebieg sprawdz() na folderze wydania: BOM + DXF + PDF z widokiem wektorowym części."""
+    for nazwa, faza, oczekiwany, status in (("GE9001", 10, 0, "ZGODNY 1:1"), ("GE9002", 5, 1, "RÓŻNICE")):
         folder = os.path.join(TMP, nazwa)
         os.makedirs(folder)
         wb = openpyxl.Workbook()
@@ -244,12 +270,26 @@ def test_caly_folder():
         ws.append([1, "PG1", "SIDE PLATE", "", "Normal", 1, "", "PL 10 x 200 x 100", "", "", "S355"])
         wb.save(os.path.join(folder, f"{nazwa}.xlsx"))
         zapisz_dxf(f"{nazwa}__PG1__10mm__S355__1.dxf", prostokat_z_fazami(faza), folder=folder)
-        zapisz_pdf("PG1__10mm__S355__1.pdf", "PL 10 x 200 x 100\nS355\nIlość: 1\n4x 10 x 45°", folder=folder)
+        # rysunek: widok 1:2 z fazami 10x10, notka przy widoku
+        doc = fitz.open()
+        strona = doc.new_page(width=842, height=595)
+        sk = 72 / 25.4 / 2
+        P = lambda x, y: fitz.Point(150 + x * sk, 400 - y * sk)  # noqa: E731
+        for l in prostokat_z_fazami(10):
+            strona.draw_line(P(*l[:2]), P(*l[2:4]), width=0.54)
+        strona.insert_text(P(205, 105), "4x 10 x 45°", fontsize=8)
+        strona.insert_text((150, 100), "VIEW1 ( 1 : 2 )", fontsize=9)
+        strona.insert_text((600, 60), "PL 10 x 200 x 100", fontsize=9)
+        strona.insert_text((600, 75), "S355", fontsize=9)
+        doc.save(os.path.join(folder, "PG1__10mm__S355__1.pdf"))
         S.WSZYSTKIE_WIERSZE.clear()
+        S.WERYFIKACJA_DXF.clear()
         assert S.sprawdz(folder) == oczekiwany, S.WSZYSTKIE_WIERSZE
+        assert S.WERYFIKACJA_DXF[0]["status"] == status, S.WERYFIKACJA_DXF
         if oczekiwany:
             w = [w for w in S.WSZYSTKIE_WIERSZE if w["poziom"] == "BŁĄD"]
-            assert w and w[0]["plik"] == "DXF" and w[0]["rodzaj"] == "fazy DXF vs rysunek", w
+            assert w and w[0]["plik"] == "DXF" and w[0]["rodzaj"] in (
+                "fazy DXF vs rysunek", "DXF vs rysunek 1:1 (nakładka)"), w
     S.zapisz_raport_xlsx(os.path.join(TMP, "raport.xlsx"))
 
 

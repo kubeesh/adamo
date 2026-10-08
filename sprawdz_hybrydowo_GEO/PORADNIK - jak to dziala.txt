@@ -128,11 +128,15 @@ z dokładnością rysunku (Inventor zapisuje widok w PDF z dokładnością
 Mniejsze różnice (np. faza 10 zamiast 11, otwór Ø13 zamiast Ø14)
 łapią porównania z wymiarami na rysunku (Ø, notki faz przy widoku).
 Wynik:
-   DXF odbiega od rysunku o więcej niż tolerancja   -> BŁĄD
+   DXF odbiega od rysunku o więcej niż 2x tolerancja -> BŁĄD
+   DXF odbiega o tolerancja..2x tolerancja           -> UWAGA (strefa szara:
+      sprawdź na podglądzie; status NIEZWERYFIKOWANY, nie ZGODNY)
       (podaje miejsce we współrzędnych DXF i maks. odchyłkę;
        części z obróbką "o"                         -> UWAGA)
    na rysunku jest otwór/wycięcie, którego nie ma
       w DXF                                         -> BŁĄD
+      (części z obróbką "o"                          -> UWAGA: otwór bywa
+       wypalany mniejszy albo wcale i obrabiany później)
       (przy ukosowaniu "u" linie ukosu tuż przy krawędzi są
        pomijane - na rysunku są, w DXF ich być nie ma)
    DXF pasuje dopiero po odbiciu lustrzanym          -> UWAGA
@@ -147,6 +151,11 @@ spaw, których w konturze DXF nie ma (wzorzec: PG4136348).
 PODGLĄD: obok raportu .xlsx powstaje "NAKLADKI_<data>.pdf" - dla każdej
 części z różnicą strona rysunku z naniesionym konturem DXF: zielone
 kropki = zgodne z rysunkiem, czerwone = różnica. Od razu widać, gdzie.
+
+MODEL .STP W RAPORCIE (od 08.10.2026): porównania z modelem 3D są w osobnej
+zakładce "Model STP (info)"; w głównej zakładce zostają tylko przy częściach,
+które mają też błąd/uwagę z DXF/PDF. Pominięcie STP (bez uruchamiania
+Inventora): zmienna środowiskowa SPRAWDZ_BEZ_STP=1.
 
 NOWOŚĆ (08.10.2026): KONTUR DXF vs RYSUNEK - FAZY, OTWORY, PRZERWY
 ------------------------------------------------------------------
@@ -170,6 +179,8 @@ go wypalarka, i porównuje go z rysunkiem PDF:
       faza w DXF, której nie ma na rysunku                -> UWAGA
       (części z ukosowaniem "u" lub obróbką "o"           -> UWAGA)
    Fazy do 2 mm z rysunku to łamanie krawędzi - pomijane.
+   Gdy nakładka NIE znalazła widoku, różnice z samych notek to tylko
+   UWAGA (notka może opisywać fazę krawędzi, np. lemiesza 8x45°).
    Gdy rysunek nie ma notek faz, a faza z DXF nie jest nigdzie
    zwymiarowana                                           -> UWAGA
 4. OTWORY - każdy okrąg z DXF musi mieć Ø na rysunku (tolerancja
